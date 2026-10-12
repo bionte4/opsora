@@ -44,14 +44,21 @@ func Requeue(ctx context.Context, rdb *redis.Client, id int64) error {
 	return err
 }
 
-// ReturnIfInFlight puts an entry back on the queue only if this caller is the
-// one that removed it from InFlight, so concurrent reapers push it once.
+// returnScript removes and re-pushes in one step, so an entry is never left
+// in neither list, and concurrent reapers push it only once.
+var returnScript = redis.NewScript(`
+if redis.call('LREM', KEYS[1], 1, ARGV[1]) == 0 then
+  return 0
+end
+redis.call('RPUSH', KEYS[2], ARGV[1])
+return 1
+`)
+
+// ReturnIfInFlight moves one entry from InFlight back to the queue. It reports
+// false when the entry was no longer in flight.
 func ReturnIfInFlight(ctx context.Context, rdb *redis.Client, raw string) (bool, error) {
-	removed, err := rdb.LRem(ctx, InFlight, 1, raw).Result()
-	if err != nil || removed == 0 {
-		return false, err
-	}
-	return true, rdb.RPush(ctx, BuildQueue, raw).Err()
+	moved, err := returnScript.Run(ctx, rdb, []string{InFlight, BuildQueue}, raw).Int()
+	return moved == 1, err
 }
 
 func ListInFlight(ctx context.Context, rdb *redis.Client) ([]string, error) {

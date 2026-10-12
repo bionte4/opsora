@@ -295,6 +295,7 @@ func (w *worker) reap(ctx context.Context, suspects map[string]bool) map[string]
 		case status == store.StatusQueued && suspects[raw]:
 			if returned, err := queue.ReturnIfInFlight(detached, w.redis, raw); err != nil {
 				log.Printf("build=%d return to queue: %v", id, err)
+				next[raw] = true
 			} else if returned {
 				log.Printf("build=%d returned to queue: taken but never claimed", id)
 			}
