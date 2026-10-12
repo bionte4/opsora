@@ -1,0 +1,5 @@
+.env
+.DS_Store
+
+/api-server/api-server
+/worker/worker
