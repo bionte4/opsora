@@ -297,6 +297,74 @@ func (s *Store) AppendLogs(ctx context.Context, buildID int64, lines []LogLine) 
 	return err
 }
 
+// NotifyNext locks the oldest finished build that has not been announced yet,
+// calls send, and marks the build announced only if send succeeds. The row
+// stays locked while send runs, so concurrent notifiers never announce the
+// same build. It reports false when no build is waiting. Builds that finished
+// longer ago than maxAge are skipped so a notifier enabled late does not flood
+// the chat with old results.
+func (s *Store) NotifyNext(ctx context.Context, statuses []string, maxAge time.Duration, send func(Build) error) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	build, err := scanBuild(tx.QueryRow(ctx, `
+		SELECT `+buildColumns+` FROM builds
+		WHERE notified_at IS NULL AND status = ANY($1)
+			AND finished_at > now() - make_interval(secs => $2)
+		ORDER BY finished_at
+		LIMIT 1
+		FOR UPDATE SKIP LOCKED`, statuses, maxAge.Seconds()))
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT position, name, status, started_at, finished_at
+		FROM build_steps WHERE build_id = $1 ORDER BY position`, build.ID)
+	if err != nil {
+		return false, err
+	}
+	build.Steps, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Step, error) {
+		var st Step
+		err := row.Scan(&st.Position, &st.Name, &st.Status, &st.StartedAt, &st.FinishedAt)
+		return st, err
+	})
+	if err != nil {
+		return false, err
+	}
+
+	if err := send(build); err != nil {
+		return true, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE builds SET notified_at = now() WHERE id = $1`, build.ID); err != nil {
+		return true, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// TailLogs returns the last n lines of one step, oldest first.
+func (s *Store) TailLogs(ctx context.Context, buildID int64, position, n int) ([]LogLine, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, position, stream, line, created_at FROM (
+			SELECT * FROM build_logs WHERE build_id = $1 AND position = $2
+			ORDER BY id DESC LIMIT $3
+		) tail ORDER BY id`, buildID, position, n)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (LogLine, error) {
+		var l LogLine
+		err := row.Scan(&l.ID, &l.Position, &l.Stream, &l.Line, &l.CreatedAt)
+		return l, err
+	})
+}
+
 // Logs returns lines with an ID greater than after, oldest first, so callers
 // can tail a running build by passing the last ID they saw.
 func (s *Store) Logs(ctx context.Context, buildID int64, position int, after int64, limit int) ([]LogLine, error) {

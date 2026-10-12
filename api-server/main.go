@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"devops-allinone/shared/metrics"
 	"devops-allinone/shared/queue"
 	"devops-allinone/shared/store"
 
@@ -75,6 +76,7 @@ func main() {
 	redisURL := mustEnv("REDIS_URL")
 	webhookSecret := mustEnv("GITHUB_WEBHOOK_SECRET")
 	port := envOr("PORT", "8080")
+	metricsAddr := envOr("METRICS_ADDR", ":9101")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -103,10 +105,14 @@ func main() {
 
 	srv := &app{db: db, store: store.New(db), redis: rdb, secret: webhookSecret}
 
+	registerQueueGauges(rdb)
+	go metrics.Serve(context.Background(), metricsAddr)
+
 	fiberApp := fiber.New(fiber.Config{
 		BodyLimit: maxWebhookBytes,
 	})
 	fiberApp.Use(recover.New())
+	fiberApp.Use(metricsMiddleware)
 	fiberApp.Use(logger.New())
 	fiberApp.Get("/", srv.health)
 	fiberApp.Get("/health", srv.health)
@@ -141,19 +147,29 @@ func (a *app) health(c *fiber.Ctx) error {
 }
 
 func (a *app) githubWebhook(c *fiber.Ctx) error {
+	// event stays "unknown" until the signature checks out, so unsigned
+	// requests cannot mint arbitrary label values.
+	event, result := "unknown", "error"
+	defer func() { webhooksTotal.WithLabelValues(event, result).Inc() }()
+
 	body := append([]byte(nil), c.Body()...)
 	if !validGitHubSignature(a.secret, c.Get("X-Hub-Signature-256"), body) {
+		result = "invalid_signature"
 		return jsonError(c, fiber.StatusUnauthorized, "invalid signature")
 	}
 
-	event := c.Get("X-GitHub-Event")
 	deliveryID := c.Get("X-GitHub-Delivery")
-	if event == "" || deliveryID == "" {
+	if h := c.Get("X-GitHub-Event"); h != "" {
+		event = h
+	}
+	if event == "unknown" || deliveryID == "" {
+		result = "bad_request"
 		return jsonError(c, fiber.StatusBadRequest, "missing X-GitHub-Event or X-GitHub-Delivery")
 	}
 
 	var payload githubPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
+		result = "bad_request"
 		return jsonError(c, fiber.StatusBadRequest, "invalid json payload")
 	}
 
@@ -167,13 +183,14 @@ func (a *app) githubWebhook(c *fiber.Ctx) error {
 			log.Printf("record delivery %s: %v", deliveryID, err)
 			return jsonError(c, fiber.StatusInternalServerError, "failed to record delivery")
 		}
-		status := "ignored"
+		result = "ignored"
 		if !created {
-			status = "duplicate"
+			result = "duplicate"
 		}
-		return c.JSON(fiber.Map{"status": status, "delivery_id": deliveryID, "reason": reason})
+		return c.JSON(fiber.Map{"status": result, "delivery_id": deliveryID, "reason": reason})
 	}
 	if payload.Repository.FullName == "" {
+		result = "bad_request"
 		return jsonError(c, fiber.StatusBadRequest, "missing repository.full_name")
 	}
 
@@ -199,6 +216,7 @@ func (a *app) githubWebhook(c *fiber.Ctx) error {
 				return jsonError(c, fiber.StatusBadGateway, "failed to enqueue build")
 			}
 		}
+		result = "duplicate"
 		return c.JSON(resp)
 	}
 
@@ -207,6 +225,7 @@ func (a *app) githubWebhook(c *fiber.Ctx) error {
 		return jsonError(c, fiber.StatusBadGateway, "failed to enqueue build")
 	}
 
+	result = "queued"
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"status":      "queued",
 		"delivery_id": deliveryID,

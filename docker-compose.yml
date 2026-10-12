@@ -1,5 +1,15 @@
 name: opsora
 
+x-internal-urls: &internal-urls
+  DATABASE_URL: &database-url postgresql://${POSTGRES_USER:-opsora}:${POSTGRES_PASSWORD:-opsora}@postgres:5432/${POSTGRES_DB:-opsora}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-opsora}@redis:6379/0
+
+x-datastores: &datastores
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -42,6 +52,103 @@ services:
       retries: 10
       start_period: 5s
 
+  api:
+    build:
+      context: .
+      args:
+        SERVICE: api-server
+    image: opsora/api-server:dev
+    restart: unless-stopped
+    environment:
+      <<: *internal-urls
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?set GITHUB_WEBHOOK_SECRET in .env}
+      PORT: "8080"
+      METRICS_ADDR: ":9101"
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on: *datastores
+
+  worker:
+    build:
+      context: .
+      args:
+        SERVICE: worker
+        # Access to docker.sock is root-equivalent on the host anyway, and the
+        # socket is only readable by root inside Docker Desktop's VM.
+        RUNTIME_IMAGE: gcr.io/distroless/static-debian13
+    image: opsora/worker:dev
+    restart: unless-stopped
+    environment:
+      <<: *internal-urls
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      OPSORA_PUBLIC_URL: ${OPSORA_PUBLIC_URL:-}
+      METRICS_ADDR: ":9102"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # On SIGTERM the worker kills its step container and requeues the build.
+    stop_grace_period: 30s
+    depends_on: *datastores
+
+  notifier:
+    build:
+      context: .
+      args:
+        SERVICE: notifier
+    image: opsora/notifier:dev
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: *database-url
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_API_URL: ${TELEGRAM_API_URL:-https://api.telegram.org}
+      TELEGRAM_NOTIFY: ${TELEGRAM_NOTIFY:-all}
+      OPSORA_PUBLIC_URL: ${OPSORA_PUBLIC_URL:-}
+      METRICS_ADDR: ":9103"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/opsora.json
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redis_data:
+  prometheus_data:
+  grafana_data:

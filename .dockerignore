@@ -1,0 +1,8 @@
+.env
+.git
+.DS_Store
+docker/
+**/*_test.go
+/api-server/api-server
+/worker/worker
+/notifier/notifier

@@ -180,9 +180,11 @@ func (w *worker) runStep(ctx, buildCtx context.Context, b store.Build, cfg pipel
 	log.Printf("build=%d step=%s status=running image=%s", b.ID, step.Name, step.Image)
 	slog := newStepLog(w.store, b.ID, position)
 	defer slog.Close()
+	stepStarted := time.Now()
 
 	finish := func(stepStatus string, res buildResult) (buildResult, error) {
 		w.setStep(b.ID, position, stepStatus)
+		stepDuration.WithLabelValues(stepStatus).Observe(time.Since(stepStarted).Seconds())
 		if res.err != "" {
 			slog.Systemf("%s", res.err)
 		}

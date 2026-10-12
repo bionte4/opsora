@@ -12,11 +12,12 @@ import (
 	"syscall"
 	"time"
 
+	"devops-allinone/shared/env"
+	"devops-allinone/shared/metrics"
 	"devops-allinone/shared/queue"
 	"devops-allinone/shared/store"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -45,9 +46,9 @@ type worker struct {
 }
 
 func main() {
-	loadEnvFiles()
-	redisURL := envOr("REDIS_URL", defaultRedisURL)
-	databaseURL := envOr("DATABASE_URL", defaultDatabaseURL)
+	env.LoadFiles()
+	redisURL := env.Or("REDIS_URL", defaultRedisURL)
+	databaseURL := env.Or("DATABASE_URL", defaultDatabaseURL)
 	githubToken := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	if githubToken == "" {
 		log.Printf("GITHUB_TOKEN not set: cloning public repositories only, no commit statuses")
@@ -100,6 +101,7 @@ func main() {
 		githubToken: githubToken,
 	}
 
+	go metrics.Serve(ctx, env.Or("METRICS_ADDR", ":9102"))
 	go w.reapLoop(ctx)
 
 	log.Printf("worker %s listening on queue %s", w.id, queue.BuildQueue)
@@ -138,6 +140,8 @@ func (w *worker) handle(ctx context.Context, raw string) {
 		return
 	}
 
+	buildsRunning.Inc()
+	defer buildsRunning.Dec()
 	log.Printf("build=%d started attempt=%d repo=%s ref=%s commit=%s actor=%s",
 		build.ID, build.Attempts, build.Repository, build.Ref, build.CommitSHA, build.Actor)
 	w.statuses.Report(detached, build, statusPending, "Build started")
@@ -167,6 +171,8 @@ func (w *worker) handle(ctx context.Context, raw string) {
 
 	log.Printf("build=%d finished status=%s duration=%s %s", build.ID, res.status, time.Since(started).Round(time.Millisecond), res.err)
 	if w.finish(build.ID, raw, res.status, res.err) {
+		buildsFinished.WithLabelValues(res.status).Inc()
+		buildDuration.WithLabelValues(res.status).Observe(time.Since(started).Seconds())
 		description := "Build succeeded"
 		if res.err != "" {
 			description = res.err
@@ -225,6 +231,7 @@ func (w *worker) release(buildID int64) {
 		log.Printf("build=%d requeue on shutdown: %v", buildID, err)
 		return
 	}
+	buildsRequeued.WithLabelValues("shutdown").Inc()
 	log.Printf("build=%d released back to %s", buildID, queue.BuildQueue)
 }
 
@@ -254,6 +261,7 @@ func (w *worker) reap(ctx context.Context, suspects map[string]bool) map[string]
 			log.Printf("build=%d requeue: %v", id, err)
 			continue
 		}
+		buildsRequeued.WithLabelValues("worker_lost").Inc()
 		log.Printf("build=%d requeued: worker stopped heartbeating", id)
 	}
 	for _, id := range failed {
@@ -263,6 +271,7 @@ func (w *worker) reap(ctx context.Context, suspects map[string]bool) map[string]
 		if err := w.runner.cleanup(detached, id); err != nil {
 			log.Printf("build=%d cleanup: %v", id, err)
 		}
+		buildsFinished.WithLabelValues(store.StatusFailed).Inc()
 		log.Printf("build=%d failed after %d attempts", id, maxAttempts)
 		if b, err := w.store.GetBuild(detached, id); err == nil {
 			w.statuses.Report(detached, b, statusError, b.Error)
@@ -297,6 +306,7 @@ func (w *worker) reap(ctx context.Context, suspects map[string]bool) map[string]
 				log.Printf("build=%d return to queue: %v", id, err)
 				next[raw] = true
 			} else if returned {
+				buildsRequeued.WithLabelValues("unclaimed").Inc()
 				log.Printf("build=%d returned to queue: taken but never claimed", id)
 			}
 		case status == store.StatusQueued:
@@ -316,27 +326,4 @@ func (w *worker) ack(raw string) {
 	if err := queue.Ack(detached, w.redis, raw); err != nil {
 		log.Printf("ack %s: %v", raw, err)
 	}
-}
-
-func loadEnvFiles() {
-	for _, path := range []string{".env", "../.env"} {
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
-			continue
-		}
-		if err := godotenv.Load(path); err != nil {
-			log.Printf("env file %s: %v", path, err)
-			continue
-		}
-		log.Printf("loaded env file %s", path)
-	}
-}
-
-func envOr(key, fallback string) string {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		log.Printf("%s not set, using default", key)
-		return fallback
-	}
-	return value
 }
