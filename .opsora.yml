@@ -1,0 +1,12 @@
+image: golang:1.27
+timeout: 15m
+env:
+  GOMODCACHE: /workspace/.cache/go-mod
+  GOCACHE: /workspace/.cache/go-build
+steps:
+  - name: download modules
+    run: go -C api-server mod download && go -C worker mod download && go -C shared mod download
+  - name: vet
+    run: go vet ./api-server/... ./worker/... ./shared/...
+  - name: build
+    run: go build ./api-server/... ./worker/... ./shared/...

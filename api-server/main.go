@@ -31,6 +31,8 @@ const (
 	zeroCommit      = "0000000000000000000000000000000000000000"
 	defaultPageSize = 20
 	maxPageSize     = 100
+	defaultLogLines = 1000
+	maxLogLines     = 5000
 )
 
 type app struct {
@@ -111,6 +113,7 @@ func main() {
 	fiberApp.Post("/api/webhook/github", srv.githubWebhook)
 	fiberApp.Get("/api/builds", srv.listBuilds)
 	fiberApp.Get("/api/builds/:id", srv.getBuild)
+	fiberApp.Get("/api/builds/:id/logs", srv.getBuildLogs)
 
 	log.Printf("listening on :%s", port)
 	if err := fiberApp.Listen(":" + port); err != nil {
@@ -279,6 +282,64 @@ func (a *app) getBuild(c *fiber.Ctx) error {
 		return jsonError(c, fiber.StatusInternalServerError, "failed to load build")
 	}
 	return c.JSON(build)
+}
+
+// getBuildLogs returns log lines oldest first. Pass the returned next_after
+// as ?after= to fetch only lines written since the previous call.
+func (a *app) getBuildLogs(c *fiber.Ctx) error {
+	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil || id < 1 {
+		return jsonError(c, fiber.StatusBadRequest, "invalid build id")
+	}
+	step := c.QueryInt("step", 0)
+	if step < 0 {
+		return jsonError(c, fiber.StatusBadRequest, "step must be a step position")
+	}
+	after, err := strconv.ParseInt(c.Query("after", "0"), 10, 64)
+	if err != nil || after < 0 {
+		return jsonError(c, fiber.StatusBadRequest, "after must be a log line id")
+	}
+	limit := c.QueryInt("limit", defaultLogLines)
+	if limit < 1 || limit > maxLogLines {
+		return jsonError(c, fiber.StatusBadRequest, "limit must be between 1 and 5000")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	if _, err := a.store.Status(ctx, id); errors.Is(err, store.ErrNotFound) {
+		return jsonError(c, fiber.StatusNotFound, "build not found")
+	} else if err != nil {
+		log.Printf("get build %d: %v", id, err)
+		return jsonError(c, fiber.StatusInternalServerError, "failed to load build")
+	}
+	lines, err := a.store.Logs(ctx, id, step, after, limit)
+	if err != nil {
+		log.Printf("get logs for build %d: %v", id, err)
+		return jsonError(c, fiber.StatusInternalServerError, "failed to load logs")
+	}
+
+	nextAfter := after
+	if len(lines) > 0 {
+		nextAfter = lines[len(lines)-1].ID
+	}
+	c.Set("X-Next-After", strconv.FormatInt(nextAfter, 10))
+
+	if c.Query("format") == "text" {
+		var b strings.Builder
+		for _, l := range lines {
+			if l.Stream == store.StreamSystem {
+				b.WriteString("[opsora] ")
+			}
+			b.WriteString(l.Line)
+			b.WriteByte('\n')
+		}
+		c.Set(fiber.HeaderContentType, fiber.MIMETextPlainCharsetUTF8)
+		return c.SendString(b.String())
+	}
+	if lines == nil {
+		lines = []store.LogLine{}
+	}
+	return c.JSON(fiber.Map{"build_id": id, "lines": lines, "next_after": nextAfter})
 }
 
 func jsonError(c *fiber.Ctx, status int, message string) error {

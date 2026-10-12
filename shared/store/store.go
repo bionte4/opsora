@@ -30,7 +30,12 @@ const (
 	StepRunning   = "running"
 	StepSuccess   = "success"
 	StepFailed    = "failed"
+	StepTimedOut  = "timed_out"
 	StepCancelled = "cancelled"
+
+	StreamStdout = "stdout"
+	StreamStderr = "stderr"
+	StreamSystem = "system"
 )
 
 type Build struct {
@@ -56,6 +61,14 @@ type Step struct {
 	Status     string     `json:"status"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
+type LogLine struct {
+	ID        int64     `json:"id"`
+	Position  int       `json:"position"`
+	Stream    string    `json:"stream"`
+	Line      string    `json:"line"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type NewBuild struct {
@@ -239,9 +252,66 @@ func (s *Store) SetStepStatus(ctx context.Context, id int64, position int, statu
 	_, err := s.pool.Exec(ctx, `
 		UPDATE build_steps SET status = $3::text,
 			started_at = CASE WHEN $3::text = 'running' THEN now() ELSE started_at END,
-			finished_at = CASE WHEN $3::text IN ('success', 'failed', 'cancelled') THEN now() ELSE finished_at END
+			finished_at = CASE WHEN $3::text IN ('success', 'failed', 'timed_out', 'cancelled') THEN now() ELSE finished_at END
 		WHERE build_id = $1 AND position = $2`, id, position, status)
 	return err
+}
+
+// AppendSteps adds pending steps after the existing ones, starting at first.
+func (s *Store) AppendSteps(ctx context.Context, id int64, first int, names []string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	for i, name := range names {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO build_steps (build_id, position, name) VALUES ($1, $2, $3)`,
+			id, first+i, name); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// CancelPendingSteps marks steps that never ran as cancelled once a build stops.
+func (s *Store) CancelPendingSteps(ctx context.Context, id int64) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE build_steps SET status = 'cancelled', finished_at = now()
+		WHERE build_id = $1 AND status = 'pending'`, id)
+	return err
+}
+
+func (s *Store) AppendLogs(ctx context.Context, buildID int64, lines []LogLine) error {
+	if len(lines) == 0 {
+		return nil
+	}
+	_, err := s.pool.CopyFrom(ctx,
+		pgx.Identifier{"build_logs"},
+		[]string{"build_id", "position", "stream", "line", "created_at"},
+		pgx.CopyFromSlice(len(lines), func(i int) ([]any, error) {
+			l := lines[i]
+			return []any{buildID, l.Position, l.Stream, l.Line, l.CreatedAt}, nil
+		}))
+	return err
+}
+
+// Logs returns lines with an ID greater than after, oldest first, so callers
+// can tail a running build by passing the last ID they saw.
+func (s *Store) Logs(ctx context.Context, buildID int64, position int, after int64, limit int) ([]LogLine, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, position, stream, line, created_at FROM build_logs
+		WHERE build_id = $1 AND id > $2 AND ($3 = 0 OR position = $3)
+		ORDER BY id LIMIT $4`, buildID, after, position, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (LogLine, error) {
+		var l LogLine
+		err := row.Scan(&l.ID, &l.Position, &l.Stream, &l.Line, &l.CreatedAt)
+		return l, err
+	})
 }
 
 // Heartbeat extends this worker's lease. False means the lease was lost and

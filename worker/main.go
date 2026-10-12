@@ -31,26 +31,26 @@ const (
 	dbTimeout          = 5 * time.Second
 )
 
-var pipelineSteps = []string{"checkout", "install dependencies", "test", "build"}
-
 // detached is used for store and Redis calls so status writes still land after
 // SIGTERM. Calls are bounded by statement_timeout and the Redis client timeouts.
 var detached = context.Background()
 
 type worker struct {
-	id           string
-	store        *store.Store
-	redis        *redis.Client
-	stepDuration time.Duration
+	id          string
+	store       *store.Store
+	redis       *redis.Client
+	runner      *runner
+	statuses    *statusReporter
+	githubToken string
 }
 
 func main() {
 	loadEnvFiles()
 	redisURL := envOr("REDIS_URL", defaultRedisURL)
 	databaseURL := envOr("DATABASE_URL", defaultDatabaseURL)
-	stepDuration, err := time.ParseDuration(envOr("STEP_DURATION", "2s"))
-	if err != nil {
-		log.Fatalf("STEP_DURATION: %v", err)
+	githubToken := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+	if githubToken == "" {
+		log.Printf("GITHUB_TOKEN not set: cloning public repositories only, no commit statuses")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -84,12 +84,20 @@ func main() {
 		log.Fatalf("redis ping: %v", err)
 	}
 
+	run, err := newRunner(ctx)
+	if err != nil {
+		log.Fatalf("docker: %v", err)
+	}
+	defer run.Close()
+
 	host, _ := os.Hostname()
 	w := &worker{
-		id:           fmt.Sprintf("%s-%d", host, os.Getpid()),
-		store:        store.New(pool),
-		redis:        rdb,
-		stepDuration: stepDuration,
+		id:          fmt.Sprintf("%s-%d", host, os.Getpid()),
+		store:       store.New(pool),
+		redis:       rdb,
+		runner:      run,
+		statuses:    newStatusReporter(githubToken, os.Getenv("OPSORA_PUBLIC_URL")),
+		githubToken: githubToken,
 	}
 
 	go w.reapLoop(ctx)
@@ -132,11 +140,7 @@ func (w *worker) handle(ctx context.Context, raw string) {
 
 	log.Printf("build=%d started attempt=%d repo=%s ref=%s commit=%s actor=%s",
 		build.ID, build.Attempts, build.Repository, build.Ref, build.CommitSHA, build.Actor)
-	if err := w.store.ResetSteps(detached, build.ID, pipelineSteps); err != nil {
-		log.Printf("build=%d reset steps: %v", build.ID, err)
-		w.finish(build.ID, raw, store.StatusFailed, "could not record steps")
-		return
-	}
+	w.statuses.Report(detached, build, statusPending, "Build started")
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -144,7 +148,7 @@ func (w *worker) handle(ctx context.Context, raw string) {
 	go w.heartbeat(runCtx, build.ID, cancelRun, leaseLost)
 
 	started := time.Now()
-	status, errText := w.runPipeline(runCtx, build.ID)
+	res, err := w.execute(runCtx, build)
 	cancelRun()
 
 	select {
@@ -156,36 +160,19 @@ func (w *worker) handle(ctx context.Context, raw string) {
 	default:
 	}
 
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || errors.Is(err, errInterrupted) {
 		w.release(build.ID)
 		return
 	}
 
-	log.Printf("build=%d finished status=%s duration=%s", build.ID, status, time.Since(started).Round(time.Millisecond))
-	w.finish(build.ID, raw, status, errText)
-}
-
-func (w *worker) runPipeline(ctx context.Context, buildID int64) (string, string) {
-	for i, name := range pipelineSteps {
-		position := i + 1
-		if err := w.store.SetStepStatus(detached, buildID, position, store.StepRunning); err != nil {
-			log.Printf("build=%d step=%s: %v", buildID, name, err)
-			return store.StatusFailed, "could not update step " + name
+	log.Printf("build=%d finished status=%s duration=%s %s", build.ID, res.status, time.Since(started).Round(time.Millisecond), res.err)
+	if w.finish(build.ID, raw, res.status, res.err) {
+		description := "Build succeeded"
+		if res.err != "" {
+			description = res.err
 		}
-		log.Printf("build=%d step=%s status=running", buildID, name)
-
-		select {
-		case <-ctx.Done():
-			w.setStep(buildID, position, store.StepCancelled)
-			log.Printf("build=%d step=%s status=cancelled", buildID, name)
-			return store.StatusFailed, "cancelled during " + name
-		case <-time.After(w.stepDuration):
-		}
-
-		w.setStep(buildID, position, store.StepSuccess)
-		log.Printf("build=%d step=%s status=success", buildID, name)
+		w.statuses.Report(detached, build, res.githubState, description)
 	}
-	return store.StatusSuccess, ""
 }
 
 func (w *worker) heartbeat(ctx context.Context, buildID int64, cancelRun context.CancelFunc, leaseLost chan<- struct{}) {
@@ -210,18 +197,19 @@ func (w *worker) heartbeat(ctx context.Context, buildID int64, cancelRun context
 	}
 }
 
-func (w *worker) finish(buildID int64, raw, status, errText string) {
+func (w *worker) finish(buildID int64, raw, status, errText string) bool {
 	ok, err := w.store.Finish(detached, buildID, w.id, status, errText)
 	if err != nil {
 		log.Printf("build=%d finish: %v", buildID, err)
-		return
+		return false
 	}
 	if !ok {
 		log.Printf("build=%d finish skipped: lease lost", buildID)
-		return
+		return false
 	}
 	w.ack(raw)
 	log.Printf("build=%d recorded status=%s", buildID, status)
+	return true
 }
 
 func (w *worker) release(buildID int64) {
@@ -272,7 +260,13 @@ func (w *worker) reap(ctx context.Context, suspects map[string]bool) map[string]
 		if err := queue.Forget(detached, w.redis, id); err != nil {
 			log.Printf("build=%d forget: %v", id, err)
 		}
+		if err := w.runner.cleanup(detached, id); err != nil {
+			log.Printf("build=%d cleanup: %v", id, err)
+		}
 		log.Printf("build=%d failed after %d attempts", id, maxAttempts)
+		if b, err := w.store.GetBuild(detached, id); err == nil {
+			w.statuses.Report(detached, b, statusError, b.Error)
+		}
 	}
 
 	entries, err := queue.ListInFlight(detached, w.redis)
