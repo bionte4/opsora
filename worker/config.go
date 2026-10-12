@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,6 +18,8 @@ const (
 	maxBuildTimeout     = 2 * time.Hour
 	maxSteps            = 50
 )
+
+var unknownField = regexp.MustCompile(`field (\S+) not found in type \S+`)
 
 type pipelineConfig struct {
 	Image   string            `yaml:"image"`
@@ -40,6 +43,14 @@ func parseConfig(data []byte) (pipelineConfig, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
+		var typeErr *yaml.TypeError
+		if errors.As(err, &typeErr) {
+			msgs := make([]string, len(typeErr.Errors))
+			for i, m := range typeErr.Errors {
+				msgs[i] = unknownField.ReplaceAllString(m, `unknown field "$1"`)
+			}
+			return pipelineConfig{}, fmt.Errorf("%s: %s", configFile, strings.Join(msgs, "; "))
+		}
 		return pipelineConfig{}, fmt.Errorf("parse %s: %w", configFile, err)
 	}
 
