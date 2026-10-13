@@ -36,6 +36,11 @@ var (
 		Name: "opsora_builds_requeued_total",
 		Help: "Builds returned to the queue, by reason.",
 	}, []string{"reason"})
+
+	deploys = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "opsora_deploys_total",
+		Help: "Deploy attempts after a successful build, by result.",
+	}, []string{"status"})
 )
 
 // Series must exist at zero before the first event, otherwise rate() and
@@ -50,5 +55,8 @@ func init() {
 	}
 	for _, r := range []string{"worker_lost", "shutdown", "unclaimed"} {
 		buildsRequeued.WithLabelValues(r)
+	}
+	for _, s := range []string{store.ReleaseActive, store.ReleaseFailed} {
+		deploys.WithLabelValues(s)
 	}
 }

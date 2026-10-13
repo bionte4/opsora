@@ -64,6 +64,8 @@ services:
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?set GITHUB_WEBHOOK_SECRET in .env}
       PORT: "8080"
       AI_SERVICE_URL: ${AI_SERVICE_URL-http://ai-service:8090}
+      CHATOPS_TOKEN: ${CHATOPS_TOKEN:-}
+      CHATOPS_ALLOWED_CHATS: ${CHATOPS_ALLOWED_CHATS:-}
       METRICS_ADDR: ":9101"
     ports:
       - "${API_PORT:-8080}:8080"
@@ -105,12 +107,16 @@ services:
       TELEGRAM_NOTIFY: ${TELEGRAM_NOTIFY:-all}
       OPSORA_PUBLIC_URL: ${OPSORA_PUBLIC_URL:-}
       AI_SERVICE_URL: ${AI_SERVICE_URL-http://ai-service:8090}
+      CHATOPS_URL: ${CHATOPS_URL-http://api:8080}
+      CHATOPS_TOKEN: ${CHATOPS_TOKEN:-}
       METRICS_ADDR: ":9103"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
+      api:
+        condition: service_started
 
   ai-service:
     build:

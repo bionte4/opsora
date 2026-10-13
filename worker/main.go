@@ -103,9 +103,15 @@ func main() {
 
 	go metrics.Serve(ctx, env.Or("METRICS_ADDR", ":9102"))
 	go w.reapLoop(ctx)
+	if err := w.store.RequeueDeployJobs(detached); err != nil {
+		log.Printf("requeue deploy jobs: %v", err)
+	}
 
 	log.Printf("worker %s listening on queue %s", w.id, queue.BuildQueue)
 	for ctx.Err() == nil {
+		if w.runDeployJob(ctx) {
+			continue
+		}
 		raw, err := queue.Dequeue(ctx, rdb, dequeueTimeout)
 		if err != nil {
 			if errors.Is(err, redis.Nil) || ctx.Err() != nil {

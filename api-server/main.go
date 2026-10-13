@@ -37,10 +37,12 @@ const (
 )
 
 type app struct {
-	db     *pgxpool.Pool
-	store  *store.Store
-	redis  *redis.Client
-	secret string
+	db           *pgxpool.Pool
+	store        *store.Store
+	redis        *redis.Client
+	secret       string
+	chatopsToken string
+	allowedChats map[string]struct{}
 }
 
 type githubPayload struct {
@@ -103,7 +105,14 @@ func main() {
 		log.Fatalf("redis ping: %v", err)
 	}
 
-	srv := &app{db: db, store: store.New(db), redis: rdb, secret: webhookSecret}
+	srv := &app{
+		db: db, store: store.New(db), redis: rdb, secret: webhookSecret,
+		chatopsToken: strings.TrimSpace(os.Getenv("CHATOPS_TOKEN")),
+		allowedChats: allowedChatSet(os.Getenv("CHATOPS_ALLOWED_CHATS")),
+	}
+	if srv.chatopsToken == "" {
+		log.Printf("CHATOPS_TOKEN not set: chat commands are disabled")
+	}
 
 	registerQueueGauges(rdb)
 	go metrics.Serve(context.Background(), metricsAddr)
@@ -125,6 +134,14 @@ func main() {
 	ai := newAIIntegration(os.Getenv("AI_SERVICE_URL"))
 	fiberApp.Get("/api/integrations/ai", ai.status)
 	fiberApp.Post("/api/integrations/ai/test", ai.test)
+
+	chat := fiberApp.Group("/api/chatops", srv.authorizeChat)
+	chat.Get("/builds", srv.chatopsStatus)
+	chat.Get("/builds/:id/logs", srv.chatopsLogs)
+	chat.Get("/builds/:id", srv.chatopsBuild)
+	chat.Post("/builds/:id/rerun", srv.chatopsRerun)
+	chat.Post("/rollback", srv.chatopsRollback)
+	chat.Get("/jobs/:id", srv.chatopsJob)
 
 	log.Printf("listening on :%s", port)
 	if err := fiberApp.Listen(":" + port); err != nil {

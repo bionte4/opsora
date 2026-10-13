@@ -19,7 +19,7 @@ const (
 	maxCitedLine        = 200
 )
 
-func formatMessage(b store.Build, failed *store.Step, tail []store.LogLine, analysis *store.Analysis, publicURL string) string {
+func formatMessage(b store.Build, failed *store.Step, tail []store.LogLine, analysis *store.Analysis, release *store.Release, publicURL string) string {
 	var sb strings.Builder
 	result := "passed"
 	if b.Status != store.StatusSuccess {
@@ -48,6 +48,8 @@ func formatMessage(b store.Build, failed *store.Step, tail []store.LogLine, anal
 		fmt.Fprintf(&sb, "Error: %s\n", esc(clip(b.Error, 500)))
 	}
 
+	writeRelease(&sb, release)
+
 	tailBudget := maxTail
 	if analysis != nil {
 		writeAnalysis(&sb, analysis)
@@ -68,13 +70,35 @@ func formatMessage(b store.Build, failed *store.Step, tail []store.LogLine, anal
 		// Escaping can grow text past its budget; drop whole sections rather
 		// than cut through a tag. The log tail goes first, then the analysis.
 		if len(tail) > 0 {
-			return formatMessage(b, failed, nil, analysis, publicURL)
+			return formatMessage(b, failed, nil, analysis, release, publicURL)
 		}
 		if analysis != nil {
-			return formatMessage(b, failed, nil, nil, publicURL)
+			return formatMessage(b, failed, nil, nil, release, publicURL)
+		}
+		if release != nil {
+			return formatMessage(b, failed, nil, nil, nil, publicURL)
 		}
 	}
 	return msg
+}
+
+func writeRelease(sb *strings.Builder, r *store.Release) {
+	if r == nil {
+		return
+	}
+	ref := r.Image + ":" + short(r.CommitSHA)
+	switch r.Status {
+	case store.ReleaseActive:
+		fmt.Fprintf(sb, "Deploy: <b>active</b> <code>%s</code>\n", esc(ref))
+	case store.ReleaseFailed:
+		fmt.Fprintf(sb, "Deploy: <b>failed</b> <code>%s</code>\n", esc(ref))
+		if r.Error != "" {
+			fmt.Fprintf(sb, "%s\n", esc(clip(r.Error, 300)))
+		}
+		fmt.Fprintf(sb, "Restore the previous release with /rollback %s\n", esc(r.Repository))
+	default:
+		fmt.Fprintf(sb, "Deploy: %s <code>%s</code>\n", esc(r.Status), esc(ref))
+	}
 }
 
 // writeAnalysis quotes the log lines the model cited, so a reader can check

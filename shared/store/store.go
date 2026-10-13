@@ -367,6 +367,23 @@ func (s *Store) TailLogs(ctx context.Context, buildID int64, position, n int) ([
 	})
 }
 
+// TailBuildLogs returns the last n lines of a build, oldest first.
+func (s *Store) TailBuildLogs(ctx context.Context, buildID int64, n int) ([]LogLine, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, position, stream, line, created_at FROM (
+			SELECT * FROM build_logs WHERE build_id = $1
+			ORDER BY id DESC LIMIT $2
+		) tail ORDER BY id`, buildID, n)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (LogLine, error) {
+		var l LogLine
+		err := row.Scan(&l.ID, &l.Position, &l.Stream, &l.Line, &l.CreatedAt)
+		return l, err
+	})
+}
+
 // Logs returns lines with an ID greater than after, oldest first, so callers
 // can tail a running build by passing the last ID they saw.
 func (s *Store) Logs(ctx context.Context, buildID int64, position int, after int64, limit int) ([]LogLine, error) {

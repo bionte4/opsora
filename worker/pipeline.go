@@ -88,6 +88,11 @@ func (w *worker) execute(ctx context.Context, b store.Build) (buildResult, error
 			return res, err
 		}
 	}
+	if cfg.Deploy != nil {
+		if err := w.deploy(buildCtx, b, cfg, volume); err != nil {
+			return buildResult{}, err
+		}
+	}
 	return buildResult{status: store.StatusSuccess, githubState: statusSuccess}, nil
 }
 

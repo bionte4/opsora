@@ -49,6 +49,7 @@ type notifier struct {
 	publicURL string
 	ai        *aiClient
 	aiWait    time.Duration
+	commands  *chatops
 }
 
 func main() {
@@ -109,6 +110,11 @@ func main() {
 	if n.ai == nil {
 		log.Printf("AI_SERVICE_URL not set: failure messages have no AI analysis")
 	}
+	n.commands = newChatops(os.Getenv("CHATOPS_URL"), os.Getenv("CHATOPS_TOKEN"))
+	if n.commands == nil {
+		log.Printf("CHATOPS_URL or CHATOPS_TOKEN not set: chat commands disabled")
+	}
+	go n.commandLoop(ctx)
 	log.Printf("notifier started: chat=%s statuses=%v", chatID, statuses)
 
 	ticker := time.NewTicker(pollInterval)
@@ -176,9 +182,16 @@ func (n *notifier) send(ctx context.Context, b store.Build) error {
 		analysis = a
 	}
 
+	var release *store.Release
+	if rel, err := n.store.ReleaseForBuild(ctx, b.ID); err == nil {
+		release = &rel
+	} else if !errors.Is(err, store.ErrNoRelease) {
+		log.Printf("build=%d release: %v", b.ID, err)
+	}
+
 	sendCtx, cancel := context.WithTimeout(ctx, sendBudget)
 	defer cancel()
-	if err := n.telegram.Send(sendCtx, formatMessage(b, failed, tail, analysis, n.publicURL)); err != nil {
+	if err := n.telegram.Send(sendCtx, formatMessage(b, failed, tail, analysis, release, n.publicURL)); err != nil {
 		var rej *rejected
 		if !errors.As(err, &rej) {
 			return err

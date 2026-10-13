@@ -14,9 +14,11 @@ import (
 )
 
 type telegram struct {
+	apiBase  string
 	endpoint string
 	chatID   string
 	client   *http.Client
+	poll     *http.Client
 }
 
 type rateLimited struct {
@@ -28,16 +30,23 @@ func (e *rateLimited) Error() string {
 }
 
 func newTelegram(apiURL, token, chatID string) *telegram {
+	base := strings.TrimRight(apiURL, "/") + "/bot" + token
 	return &telegram{
-		endpoint: strings.TrimRight(apiURL, "/") + "/bot" + token + "/sendMessage",
+		apiBase:  base,
+		endpoint: base + "/sendMessage",
 		chatID:   chatID,
 		client:   &http.Client{Timeout: 10 * time.Second},
+		poll:     &http.Client{Timeout: 35 * time.Second},
 	}
 }
 
 func (t *telegram) Send(ctx context.Context, text string) error {
+	return t.SendTo(ctx, t.chatID, text)
+}
+
+func (t *telegram) SendTo(ctx context.Context, chatID, text string) error {
 	body, err := json.Marshal(map[string]any{
-		"chat_id":              t.chatID,
+		"chat_id":              chatID,
 		"text":                 text,
 		"parse_mode":           "HTML",
 		"link_preview_options": map[string]bool{"is_disabled": true},
@@ -93,3 +102,48 @@ type rejected struct{ err error }
 
 func (e *rejected) Error() string { return e.err.Error() }
 func (e *rejected) Unwrap() error { return e.err }
+
+type tgUpdate struct {
+	UpdateID int64 `json:"update_id"`
+	Message  struct {
+		Text string `json:"text"`
+		Chat struct {
+			ID int64 `json:"id"`
+		} `json:"chat"`
+	} `json:"message"`
+}
+
+// Updates long-polls getUpdates. timeout is Telegram's server-side wait, in
+// seconds; the HTTP client allows a few seconds more.
+func (t *telegram) Updates(ctx context.Context, offset int64, timeout int) ([]tgUpdate, error) {
+	endpoint := fmt.Sprintf("%s/getUpdates?timeout=%d", t.apiBase, timeout)
+	if offset > 0 {
+		endpoint += fmt.Sprintf("&offset=%d", offset)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, errors.New("telegram: invalid TELEGRAM_API_URL")
+	}
+	resp, err := t.poll.Do(req)
+	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return nil, fmt.Errorf("telegram updates: %w", err)
+	}
+	defer resp.Body.Close()
+	var result struct {
+		OK          bool       `json:"ok"`
+		Result      []tgUpdate `json:"result"`
+		Description string     `json:"description"`
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("telegram updates: HTTP %d with unreadable body", resp.StatusCode)
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("telegram updates: HTTP %d: %s", resp.StatusCode, result.Description)
+	}
+	return result.Result, nil
+}

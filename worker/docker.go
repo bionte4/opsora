@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"strconv"
+	"strings"
+	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/pkg/stdcopy"
@@ -19,6 +22,8 @@ const (
 	workspaceDir = "/workspace"
 	gitImage     = "alpine/git:latest"
 	labelBuild   = "opsora.build"
+	labelDeploy  = "opsora.deploy"
+	archiveImage = "alpine:3.22"
 
 	stepMemoryBytes = 2 << 30
 	stepNanoCPUs    = 2_000_000_000
@@ -191,6 +196,177 @@ func (r *runner) run(ctx context.Context, spec containerSpec, stdout, stderr io.
 			return -1, ctx.Err()
 		}
 		return -1, fmt.Errorf("wait container: %w", err)
+	}
+}
+
+// workspaceArchive returns a tar of the repository root. The container is only
+// created so the volume can be read; it is never started. close must run
+// after the tar has been consumed.
+func (r *runner) workspaceArchive(ctx context.Context, buildID int64, volume string) (io.ReadCloser, func(), error) {
+	if err := r.ensureImage(ctx, archiveImage, log.Printf); err != nil {
+		return nil, nil, err
+	}
+	created, err := r.cli.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
+			Image:  archiveImage,
+			Cmd:    []string{"true"},
+			Labels: buildLabels(buildID),
+		},
+		HostConfig: &container.HostConfig{
+			Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: volume, Target: workspaceDir}},
+		},
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("archive workspace: %w", err)
+	}
+	id := created.ID
+	res, err := r.cli.CopyFromContainer(ctx, id, client.CopyFromContainerOptions{SourcePath: workspaceDir + "/."})
+	if err != nil {
+		_, _ = r.cli.ContainerRemove(detached, id, client.ContainerRemoveOptions{Force: true})
+		return nil, nil, fmt.Errorf("archive workspace: %w", err)
+	}
+	closeArchive := func() {
+		res.Content.Close()
+		if _, err := r.cli.ContainerRemove(detached, id, client.ContainerRemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) {
+			log.Printf("remove archive container %s: %v", id[:12], err)
+		}
+	}
+	return res.Content, closeArchive, nil
+}
+
+// buildImage builds a single image tag from the workspace. The Dockerfile RUN
+// steps execute on the Docker daemon, so deploy is opt-in and only for
+// repositories the operator trusts.
+func (r *runner) buildImage(ctx context.Context, buildID int64, volume, dockerfile, tag string) error {
+	body, closeArchive, err := r.workspaceArchive(ctx, buildID, volume)
+	if err != nil {
+		return err
+	}
+	defer closeArchive()
+	resp, err := r.cli.ImageBuild(ctx, body, client.ImageBuildOptions{
+		Tags:       []string{tag},
+		Dockerfile: dockerfile,
+		Remove:     true,
+		PullParent: true,
+		Memory:     stepMemoryBytes,
+		// Do not label the image with opsora.build. A container started from it
+		// would inherit that label and the build cleanup would remove it.
+	})
+	if err != nil {
+		return fmt.Errorf("docker build: %w", err)
+	}
+	defer resp.Body.Close()
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var msg struct {
+			Error string `json:"error"`
+		}
+		if err := dec.Decode(&msg); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("docker build: %w", err)
+		}
+		if msg.Error != "" {
+			return fmt.Errorf("docker build: %s", msg.Error)
+		}
+	}
+}
+
+func (r *runner) tagImage(ctx context.Context, source, target string) error {
+	_, err := r.cli.ImageTag(ctx, client.ImageTagOptions{Source: source, Target: target})
+	return err
+}
+
+func deployContainerName(repository string) string {
+	return "opsora-deploy-" + strings.NewReplacer("/", "-", ":", "-").Replace(strings.ToLower(repository))
+}
+
+// replaceDeployContainer stops whatever is deployed for the repository and
+// starts imageRef. The container gets no mounts and no secrets.
+func (r *runner) replaceDeployContainer(ctx context.Context, repository, imageRef string) error {
+	name := deployContainerName(repository)
+	if _, err := r.cli.ContainerRemove(ctx, name, client.ContainerRemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("remove deploy container: %w", err)
+	}
+	init := true
+	pids := int64(512)
+	created, err := r.cli.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Name: name,
+		Config: &container.Config{
+			Image:  imageRef,
+			Labels: map[string]string{labelDeploy: repository, "opsora.image": imageRef},
+		},
+		HostConfig: &container.HostConfig{
+			Resources: container.Resources{
+				Memory:    1 << 30,
+				NanoCPUs:  1_000_000_000,
+				PidsLimit: &pids,
+			},
+			SecurityOpt: []string{"no-new-privileges"},
+			Init:        &init,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create deploy container: %w", err)
+	}
+	if _, err := r.cli.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+		return fmt.Errorf("start deploy container: %w", err)
+	}
+	return nil
+}
+
+func (r *runner) removeDeployContainer(ctx context.Context, repository string) error {
+	name := deployContainerName(repository)
+	_, err := r.cli.ContainerRemove(ctx, name, client.ContainerRemoveOptions{Force: true})
+	if cerrdefs.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+type deployState struct {
+	missing bool
+	running bool
+	exit    int
+	image   string
+}
+
+func (r *runner) inspectDeploy(ctx context.Context, repository string) (deployState, error) {
+	res, err := r.cli.ContainerInspect(ctx, deployContainerName(repository), client.ContainerInspectOptions{})
+	if cerrdefs.IsNotFound(err) {
+		return deployState{missing: true}, nil
+	}
+	if err != nil {
+		return deployState{}, err
+	}
+	st := deployState{}
+	if res.Container.State != nil {
+		st.running = res.Container.State.Running
+		st.exit = res.Container.State.ExitCode
+	}
+	if res.Container.Config != nil {
+		st.image = res.Container.Config.Image
+	}
+	return st, nil
+}
+
+// waitDeployed returns when the container has exited or settle has passed
+// while it is still running.
+func (r *runner) waitDeployed(ctx context.Context, repository string, settle time.Duration) (deployState, error) {
+	deadline := time.Now().Add(settle)
+	for {
+		st, err := r.inspectDeploy(ctx, repository)
+		if err != nil || st.missing || !st.running || !time.Now().Before(deadline) {
+			return st, err
+		}
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return st, ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 

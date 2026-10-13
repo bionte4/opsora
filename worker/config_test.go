@@ -30,6 +30,26 @@ steps:
 	if got := cfg.Steps[1].Timeout; got != 10*time.Minute {
 		t.Errorf("step timeout = %s, want capped at build timeout", got)
 	}
+	if cfg.Deploy != nil {
+		t.Fatal("deploy should be absent")
+	}
+}
+
+func TestParseConfigDeploy(t *testing.T) {
+	cfg, err := parseConfig([]byte(`
+image: alpine:3.22
+steps:
+  - name: test
+    run: echo ok
+deploy:
+  image: ghcr.io/acme/app
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Deploy.Image != "ghcr.io/acme/app" || cfg.Deploy.Dockerfile != "Dockerfile" || cfg.Deploy.Settle != 5*time.Second {
+		t.Fatalf("deploy = %+v", cfg.Deploy)
+	}
 }
 
 func TestParseConfigRejects(t *testing.T) {
@@ -48,6 +68,8 @@ func TestParseConfigRejects(t *testing.T) {
 		"duplicate name": {yaml: "image: a\nsteps:\n  - name: x\n    run: a\n  - name: x\n    run: b\n", want: "used twice"},
 		"bad env":        {yaml: "image: a\nenv:\n  'A=B': c\nsteps:\n  - name: x\n    run: a\n", want: "not valid"},
 		"long timeout":   {yaml: "image: a\ntimeout: 3h\nsteps:\n  - name: x\n    run: a\n", want: "timeout must be"},
+		"tagged image":   {yaml: "image: a\nsteps:\n  - name: x\n    run: a\ndeploy:\n  image: app:latest\n", want: "deploy.image"},
+		"bad dockerfile": {yaml: "image: a\nsteps:\n  - name: x\n    run: a\ndeploy:\n  image: app\n  dockerfile: ../Dockerfile\n", want: "deploy.dockerfile"},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {

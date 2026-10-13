@@ -17,6 +17,8 @@ const (
 	defaultBuildTimeout = 30 * time.Minute
 	maxBuildTimeout     = 2 * time.Hour
 	maxSteps            = 50
+	defaultSettle       = 5 * time.Second
+	maxSettle           = 2 * time.Minute
 )
 
 var unknownField = regexp.MustCompile(`field (\S+) not found in type \S+`)
@@ -26,6 +28,13 @@ type pipelineConfig struct {
 	Timeout time.Duration     `yaml:"timeout"`
 	Env     map[string]string `yaml:"env"`
 	Steps   []stepConfig      `yaml:"steps"`
+	Deploy  *deployConfig     `yaml:"deploy"`
+}
+
+type deployConfig struct {
+	Image      string        `yaml:"image"`
+	Dockerfile string        `yaml:"dockerfile"`
+	Settle     time.Duration `yaml:"settle"`
 }
 
 type stepConfig struct {
@@ -102,7 +111,34 @@ func parseConfig(data []byte) (pipelineConfig, error) {
 			return pipelineConfig{}, fmt.Errorf("step %q: %w", step.Name, err)
 		}
 	}
+	if err := validateDeploy(cfg.Deploy); err != nil {
+		return pipelineConfig{}, err
+	}
 	return cfg, nil
+}
+
+var imageName = regexp.MustCompile(`^[a-z0-9]+([._/-][a-z0-9]+)*$`)
+
+func validateDeploy(d *deployConfig) error {
+	if d == nil {
+		return nil
+	}
+	if !imageName.MatchString(d.Image) {
+		return fmt.Errorf("deploy.image %q must be a lowercase name without a tag, like myapp or ghcr.io/org/myapp", d.Image)
+	}
+	if d.Dockerfile == "" {
+		d.Dockerfile = "Dockerfile"
+	}
+	if strings.Contains(d.Dockerfile, "..") || strings.HasPrefix(d.Dockerfile, "/") || strings.TrimSpace(d.Dockerfile) != d.Dockerfile {
+		return fmt.Errorf("deploy.dockerfile %q must be a relative path inside the repository", d.Dockerfile)
+	}
+	if d.Settle == 0 {
+		d.Settle = defaultSettle
+	}
+	if d.Settle < time.Second || d.Settle > maxSettle {
+		return fmt.Errorf("deploy.settle must be between 1s and %s", maxSettle)
+	}
+	return nil
 }
 
 func validateEnv(env map[string]string) error {

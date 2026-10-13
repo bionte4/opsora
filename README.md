@@ -138,6 +138,46 @@ To turn analysis off, set `AI_SERVICE_URL=` (empty) in `.env`.
 Log output is treated as untrusted data in the prompt, but a model can still be
 misled by it, so messages label the analysis "may be wrong".
 
+### Chat commands
+
+The notifier also polls the bot for commands and calls the API. The API holds
+the allowlist, so a chat that is not listed is rejected:
+
+| Command | Action |
+| --- | --- |
+| `/status` | Latest builds. `/status 17` shows one build. |
+| `/logs 17` | Last log lines of a build. |
+| `/rerun 17` | Queues a new build of that commit. |
+| `/rollback` | Restores the active release. Add the repository name when more than one has been deployed. |
+
+Set `CHATOPS_TOKEN` to a long random string (the same value in the API and the
+notifier) and `CHATOPS_ALLOWED_CHATS` to a comma-separated list of chat IDs.
+Without the token, commands are disabled and notifications still work.
+
+### Deploy and rollback
+
+A repository can opt in to a deploy after the pipeline succeeds:
+
+```yaml
+deploy:
+  image: ghcr.io/acme/app   # lowercase, no tag; Opsora adds the commit SHA
+  dockerfile: Dockerfile    # optional, default Dockerfile
+  settle: 5s                # how long the new container must stay up
+```
+
+The worker builds that image from the commit that just passed, tags it
+`<image>:<commit sha>` and `<image>:current`, and starts a container named
+`opsora-deploy-<repository>`. The build stays green if the deploy fails; the
+release is recorded as failed and the previous active release is kept. The
+failure message includes `/rollback`.
+
+`/rollback` starts the active release's image again and marks the failed
+release rolled back. `image:current` always points at the active release.
+
+The deploy container has no mounts and no platform secrets. It is limited to
+1 GB of memory and 1 CPU. `docker build` itself runs on the host's Docker
+daemon, so only enable `deploy` for repositories you trust.
+
 ## Pipeline file
 
 Put `.opsora.yml` at the root of the repository being built:
@@ -179,6 +219,10 @@ This repository builds itself with its own [`.opsora.yml`](.opsora.yml).
 | GET    | `/api/builds/:id/analysis` | AI analysis of a failed build, with the cited log lines  |
 | GET    | `/api/integrations/ai`     | AI integration status: reachable, model installed, latency |
 | POST   | `/api/integrations/ai/test` | Test connection: runs a tiny generation (can take ~10s) |
+| GET    | `/api/chatops/builds`      | Latest builds. Requires `Authorization: Bearer $CHATOPS_TOKEN` and header `X-Opsora-Chat-Id` |
+| POST   | `/api/chatops/builds/:id/rerun` | Queue a new build of that commit |
+| POST   | `/api/chatops/rollback`    | Restore the active release. Body `{"repository":"org/repo"}` |
+| GET    | `/api/chatops/jobs/:id`    | Rollback job status |
 
 To follow a running build, pass the `X-Next-After` response header back as
 `after`.
@@ -208,6 +252,8 @@ Main metrics:
 - `opsora_notifications_total{result}`
 - `opsora_ai_requests_total{kind,result}`
 - `opsora_ai_duration_seconds{kind}`
+- `opsora_chatops_commands_total{command,result}`
+- `opsora_deploys_total{status}`
 - `opsora_http_request_duration_seconds{route,method,code}`
 
 ## Development
@@ -248,6 +294,10 @@ Container images are built from the single root `Dockerfile` with
 
 - The worker container mounts `/var/run/docker.sock`, which is equivalent to
   root access on the host. Run Opsora only on a machine dedicated to CI and
-  only build repositories you trust.
+  only build repositories you trust. A `deploy` section runs `docker build` on
+  that daemon, so a Dockerfile can do more than a pipeline step can.
+- Chat commands are rejected unless the chat ID is in `CHATOPS_ALLOWED_CHATS`
+  and the caller presents `CHATOPS_TOKEN`. The build and log read API is still
+  open on the host port; do not expose it publicly without a reverse proxy.
 - Never commit `.env`; it is ignored by git and excluded from Docker builds.
 - Change the default Postgres and Redis passwords before exposing the host.
