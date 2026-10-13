@@ -1,0 +1,41 @@
+{{define "login"}}
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Masuk · Opsora</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="login-shell">
+  <aside class="login-aside">
+    <a class="brand" href="/" style="color:white"><span class="mark" aria-hidden="true"><span></span></span>Opsora</a>
+    <div>
+      <h1>Konsol untuk orang yang menjalankan build.</h1>
+      <p>Peran menentukan apa yang bisa dilihat dan diubah. Pengunjung tanpa akun tidak masuk ke dasbor.</p>
+    </div>
+    <p class="hint">Build, pengguna, peran, integrasi.</p>
+  </aside>
+  <main class="login-main" id="isi">
+    <form class="login-card" method="post" action="/login">
+      <h2>Masuk</h2>
+      <p class="hint">Gunakan akun yang dibuat admin konsol.</p>
+      {{template "flash" .}}
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="hidden" name="next" value="{{.Next}}">
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="username" required autofocus>
+      </div>
+      <div class="field">
+        <label for="password">Kata sandi</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button class="btn btn-primary" type="submit" style="width:100%">Masuk</button>
+    </form>
+  </main>
+</div>
+</body>
+</html>
+{{end}}

@@ -29,7 +29,7 @@ func TestFormatMessageFailure(t *testing.T) {
 		"Failed step: <b>test</b> (failed)",
 		"Error: step &#34;test&#34; exited with code 1",
 		"<pre>--- FAIL: TestX\nwant &lt;nil&gt;, got &amp;errors.errorString</pre>",
-		`<a href="https://ci.example.com/api/builds/7/logs?format=text">Full logs</a>`,
+		`<a href="https://ci.example.com/app/builds/7">Full logs</a>`,
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message missing %q\n%s", want, msg)

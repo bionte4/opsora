@@ -52,7 +52,7 @@ func (r *statusReporter) Report(ctx context.Context, b store.Build, state, descr
 		"description": description,
 	}
 	if r.publicURL != "" {
-		body["target_url"] = fmt.Sprintf("%s/api/builds/%d", r.publicURL, b.ID)
+		body["target_url"] = fmt.Sprintf("%s/app/builds/%d", r.publicURL, b.ID)
 	}
 	payload, _ := json.Marshal(body)
 

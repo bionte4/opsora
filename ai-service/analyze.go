@@ -80,7 +80,7 @@ type answer struct {
 // build_logs IDs, dropping numbers that were not in the prompt.
 func parseAnswer(raw string, lines []store.LogLine) (summary, cause string, ids []int64, err error) {
 	var a answer
-	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &a); err != nil {
+	if err := json.Unmarshal([]byte(stripFence(raw)), &a); err != nil {
 		return "", "", nil, fmt.Errorf("model did not return valid JSON: %w", err)
 	}
 	summary = clip(strings.TrimSpace(a.Summary), maxSummary)
@@ -101,6 +101,19 @@ func parseAnswer(raw string, lines []store.LogLine) (summary, cause string, ids 
 		}
 	}
 	return summary, cause, ids, nil
+}
+
+func stripFence(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	if i := strings.LastIndex(s, "```"); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }
 
 func clip(s string, n int) string {

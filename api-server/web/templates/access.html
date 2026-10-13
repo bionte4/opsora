@@ -1,0 +1,152 @@
+{{define "users"}}
+{{template "start" .}}
+<div class="page-head">
+  <div>
+    <h1>Pengguna</h1>
+    <p>Setiap orang punya satu peran. Peran itu yang menentukan izin.</p>
+  </div>
+  {{if can .Account "users.write"}}<a class="btn btn-primary" href="/app/users/new">Pengguna baru</a>{{end}}
+</div>
+{{template "flash" .}}
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Nama</th><th>Email</th><th>Peran</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {{range .Users}}
+    <tr>
+      <td data-label="Nama">{{.Name}}</td>
+      <td data-label="Email">{{.Email}}</td>
+      <td data-label="Peran" style="text-transform:capitalize">{{.RoleName}}</td>
+      <td data-label="Status">{{if .Disabled}}<span class="pill pill-bad">nonaktif</span>{{else}}<span class="pill pill-ok">aktif</span>{{end}}</td>
+      <td data-label="">{{if can $.Account "users.write"}}<a class="btn btn-ghost btn-small" href="/app/users/{{.ID}}">Ubah</a>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{template "end" .}}
+{{end}}
+
+{{define "userform"}}
+{{template "start" .}}
+<div class="page-head">
+  <div>
+    <h1>{{if .IsNew}}Pengguna baru{{else}}Ubah pengguna{{end}}</h1>
+    <p>{{if .IsNew}}Kata sandi minimal 8 karakter.{{else}}Kosongkan kata sandi kalau tidak diganti.{{end}}</p>
+  </div>
+</div>
+{{template "flash" .}}
+<form method="post" action="{{if .IsNew}}/app/users{{else}}/app/users/{{.User.ID}}{{end}}" class="panel form-grid">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <div class="field">
+    <label for="name">Nama</label>
+    <input id="name" name="name" type="text" required maxlength="80" value="{{.User.Name}}">
+  </div>
+  <div class="field">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" required maxlength="200" value="{{.User.Email}}" {{if not .IsNew}}readonly{{end}}>
+  </div>
+  <div class="field">
+    <label for="password">Kata sandi</label>
+    <input id="password" name="password" type="password" autocomplete="new-password" {{if .IsNew}}required{{end}}>
+  </div>
+  <div class="field">
+    <label for="role_id">Peran</label>
+    <select id="role_id" name="role_id">
+      {{range .Roles}}<option value="{{.ID}}" {{if eq .ID $.User.RoleID}}selected{{end}}>{{.Name}}</option>{{end}}
+    </select>
+  </div>
+  {{if not .IsNew}}
+  <label class="check"><input type="checkbox" name="disabled" value="1" {{if .User.Disabled}}checked{{end}}><span>Nonaktifkan akun ini</span></label>
+  {{end}}
+  <div class="actions">
+    <button class="btn btn-primary" type="submit">Simpan</button>
+    <a class="btn btn-ghost" href="/app/users">Batal</a>
+  </div>
+</form>
+{{if and (not .IsNew) (ne .User.ID .Account.ID)}}
+<form method="post" action="/app/users/{{.User.ID}}/delete" data-confirm="Hapus pengguna ini?" style="margin-top:12px">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button class="btn btn-danger" type="submit">Hapus pengguna</button>
+</form>
+{{end}}
+{{template "end" .}}
+{{end}}
+
+{{define "roles"}}
+{{template "start" .}}
+<div class="page-head">
+  <div>
+    <h1>Peran</h1>
+    <p>Admin, operator, dan viewer adalah peran sistem. Peran lain bisa ditambah dan dihapus.</p>
+  </div>
+  {{if can .Account "roles.write"}}<a class="btn btn-primary" href="/app/roles/new">Peran baru</a>{{end}}
+</div>
+{{template "flash" .}}
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Nama</th><th>Pemakai</th><th>Jenis</th><th></th></tr></thead>
+    <tbody>
+    {{range .Roles}}
+    <tr>
+      <td data-label="Nama"><a class="rowlink" href="/app/roles/{{.ID}}">{{.Name}}</a><div class="hint">{{.Description}}</div></td>
+      <td data-label="Pemakai">{{.UserCount}}</td>
+      <td data-label="Jenis">{{if .System}}sistem{{else}}kustom{{end}}</td>
+      <td data-label=""></td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{template "end" .}}
+{{end}}
+
+{{define "roleform"}}
+{{template "start" .}}
+<div class="page-head">
+  <div>
+    <h1>{{if .IsNew}}Peran baru{{else}}{{.Role.Name}}{{end}}</h1>
+    <p>{{if .Role.System}}Peran sistem mengikuti izin bawaan dan tidak diubah dari sini.{{else}}Centang izin yang boleh dilakukan peran ini.{{end}}</p>
+  </div>
+</div>
+{{template "flash" .}}
+<form method="post" action="{{if .IsNew}}/app/roles{{else}}/app/roles/{{.Role.ID}}{{end}}" class="panel">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  {{if .IsNew}}
+  <div class="field">
+    <label for="name">Nama</label>
+    <input id="name" name="name" type="text" required maxlength="32" pattern="[a-z][a-z0-9-]{1,31}" value="{{.Role.Name}}" placeholder="release-manager">
+    <p class="hint">Huruf kecil, angka, dan tanda hubung.</p>
+  </div>
+  {{end}}
+  <div class="field">
+    <label for="description">Deskripsi</label>
+    <textarea id="description" name="description" maxlength="200" {{if .Role.System}}readonly{{end}}>{{.Role.Description}}</textarea>
+  </div>
+  {{range .Groups}}
+  <h2 class="group-title">{{.Name}}</h2>
+  <div class="checks">
+    {{range .Items}}
+    <label class="check">
+      <input type="checkbox" name="perm" value="{{.Key}}" {{if $.Role.Has .Key}}checked{{end}} {{if $.Role.System}}disabled{{end}}>
+      <span>{{.Label}}</span>
+    </label>
+    {{end}}
+  </div>
+  {{end}}
+  {{if and (not .Role.System) (can .Account "roles.write")}}
+  <div class="actions" style="margin-top:18px">
+    <button class="btn btn-primary" type="submit">Simpan</button>
+    <a class="btn btn-ghost" href="/app/roles">Batal</a>
+  </div>
+  {{end}}
+</form>
+{{if and (not .IsNew) (not .Role.System) (can .Account "roles.write")}}
+<form method="post" action="/app/roles/{{.Role.ID}}/delete" data-confirm="Hapus peran ini?" style="margin-top:12px">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button class="btn btn-danger" type="submit" {{if gt .Role.UserCount 0}}disabled{{end}}>Hapus peran</button>
+  {{if gt .Role.UserCount 0}}<p class="hint">Masih dipakai {{.Role.UserCount}} pengguna.</p>{{end}}
+</form>
+{{end}}
+{{template "end" .}}
+{{end}}

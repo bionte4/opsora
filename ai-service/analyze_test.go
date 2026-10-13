@@ -46,6 +46,17 @@ func TestParseAnswerMapsCitedLines(t *testing.T) {
 	}
 }
 
+func TestParseAnswerStripsMarkdownFence(t *testing.T) {
+	raw := "```json\n{\"summary\":\"step test failed\",\"cause\":\"assert\",\"lines\":[1]}\n```"
+	summary, _, ids, err := parseAnswer(raw, []store.LogLine{{ID: 4}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != "step test failed" || len(ids) != 1 || ids[0] != 4 {
+		t.Fatalf("summary=%q ids=%v", summary, ids)
+	}
+}
+
 func TestParseAnswerRejectsBadOutput(t *testing.T) {
 	for name, raw := range map[string]string{
 		"not json":      "The build failed because...",

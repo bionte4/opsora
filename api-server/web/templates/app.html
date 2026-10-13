@@ -1,0 +1,219 @@
+{{define "dashboard"}}
+{{template "start" .}}
+<div class="page-head">
+  <div>
+    <h1>Dasbor</h1>
+    <p>Build 24 jam terakhir, rilis yang aktif, dan analisis kegagalan. Metrik mesin ada di Grafana pada port 3000.</p>
+  </div>
+</div>
+{{template "flash" .}}
+{{if can .Account "builds.read"}}
+<div class="stat-grid">
+  <article class="panel stat"><span class="meta">Lulus</span><strong>{{.Totals.Success}}</strong></article>
+  <article class="panel stat"><span class="meta">Gagal</span><strong>{{.Totals.Failed}}</strong></article>
+  <article class="panel stat"><span class="meta">Berjalan</span><strong>{{.Totals.Running}}</strong></article>
+  <article class="panel stat"><span class="meta">Antre</span><strong>{{.Totals.Queued}}</strong></article>
+</div>
+<div class="dash-grid">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Pipeline terbaru</h2>
+      <a href="/app/builds">Semua build</a>
+    </div>
+    {{if not .Builds}}
+    <p class="hint">Belum ada build. Push ke repositori yang webhook-nya mengarah ke Opsora.</p>
+    {{else}}
+    <ul class="dash-list">
+      {{range .Builds}}
+      <li class="dash-row">
+        <span class="pill {{if eq .Status "success"}}pill-ok{{else if eq .Status "failed"}}pill-bad{{else if eq .Status "running"}}pill-warn{{else}}pill-neutral{{end}}">{{statusLabel .Status}}</span>
+        <a class="rowlink" href="/app/builds/{{.ID}}">{{.Repository}}</a>
+        <span class="meta">{{refName .Ref}} · {{shortSHA .CommitSHA}}</span>
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+  </section>
+  <section class="panel">
+    <h2>Rilis aktif</h2>
+    {{if not .Releases}}
+    <p class="hint">Belum ada rilis aktif.</p>
+    {{else}}
+    <ul class="dash-list">
+      {{range .Releases}}
+      <li class="dash-row">
+        <span class="pill pill-ok">{{statusLabel .Status}}</span>
+        <span>{{if .BuildID}}<a class="rowlink" href="/app/builds/{{.BuildID}}">{{.Repository}}</a>{{else}}{{.Repository}}{{end}}</span>
+        <span class="meta">{{shortSHA .CommitSHA}}</span>
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+    {{if .Jobs}}
+    <h2>Rollback</h2>
+    <ul class="dash-list">
+      {{range .Jobs}}
+      <li class="dash-row">
+        <span class="pill {{if eq .Status "running"}}pill-warn{{else}}pill-neutral{{end}}">{{statusLabel .Status}}</span>
+        <span>{{.Repository}}</span>
+        <span class="meta">{{when .CreatedAt}}</span>
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+  </section>
+</div>
+<section class="panel">
+  <h2>Analisis kegagalan</h2>
+  {{if not .Notes}}
+  <p class="hint">Belum ada analisis. Penjelasan ditulis saat build gagal dan layanan AI hidup.</p>
+  {{else}}
+  {{range .Notes}}
+  <article class="note">
+    <p><a class="rowlink" href="/app/builds/{{.BuildID}}">{{.Repository}}</a> <span class="meta">{{when .CreatedAt}}</span> {{if .Repeated}}<span class="pill pill-warn">Pola berulang</span>{{end}}</p>
+    <p>{{.Summary}}</p>
+  </article>
+  {{end}}
+  {{end}}
+</section>
+{{else}}
+<p class="empty">Peran Anda tidak melihat build. Gunakan menu untuk halaman yang diizinkan.</p>
+{{end}}
+{{if can .Account "integrations.read"}}
+<article class="panel" data-ai-status>
+  <div class="panel-head">
+    <h2>AI service</h2>
+    <span class="pill pill-neutral" data-ai-pill>Memeriksa</span>
+  </div>
+  <p class="hint" data-ai-loading>Membaca status…</p>
+  <div data-ai-body hidden>
+    <dl class="facts" data-ai-facts></dl>
+    <p class="ai-error" data-ai-error hidden></p>
+  </div>
+  <p><a class="btn btn-ghost" href="/app/integrations">Buka integrasi</a></p>
+</article>
+{{end}}
+{{template "end" .}}
+{{end}}
+
+{{define "builds"}}
+{{template "start" .}}
+<div class="page-head">
+  <div>
+    <h1>Build</h1>
+    <p>Dua puluh build terakhir yang tercatat di Postgres.</p>
+  </div>
+</div>
+{{template "flash" .}}
+{{if not (can .Account "builds.read")}}
+<p class="empty">Peran Anda tidak melihat build. Gunakan menu untuk halaman yang diizinkan.</p>
+{{else if not .Builds}}
+<p class="empty">Belum ada build. Push ke repositori yang webhook-nya mengarah ke Opsora.</p>
+{{else}}
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Status</th><th>Repositori</th><th>Ref</th><th>Commit</th><th>Kapan</th></tr></thead>
+    <tbody>
+    {{range .Builds}}
+    <tr>
+      <td data-label="Status"><span class="pill {{if eq .Status "success"}}pill-ok{{else if eq .Status "failed"}}pill-bad{{else if eq .Status "running"}}pill-warn{{else}}pill-neutral{{end}}">{{statusLabel .Status}}</span></td>
+      <td data-label="Repositori"><a class="rowlink" href="/app/builds/{{.ID}}">{{.Repository}}</a></td>
+      <td data-label="Ref" class="meta">{{refName .Ref}}</td>
+      <td data-label="Commit" class="meta">{{shortSHA .CommitSHA}}</td>
+      <td data-label="Kapan" class="meta">{{when .CreatedAt}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+{{template "end" .}}
+{{end}}
+
+{{define "build"}}
+{{template "start" .}}
+<div class="page-head">
+  <div>
+    <p class="kicker">Build #{{.Build.ID}}</p>
+    <h1>{{.Build.Repository}}</h1>
+    <p>{{refName .Build.Ref}} · <span class="meta">{{shortSHA .Build.CommitSHA}}</span> · {{.Build.Actor}}</p>
+  </div>
+  <span class="pill {{if eq .Build.Status "success"}}pill-ok{{else if eq .Build.Status "failed"}}pill-bad{{else}}pill-warn{{end}}">{{statusLabel .Build.Status}}</span>
+</div>
+{{template "flash" .}}
+<div class="detail-grid">
+  <section class="panel">
+    <h2>Langkah</h2>
+    <ol class="steps">
+      {{range .Build.Steps}}
+      <li><strong>{{.Name}}</strong> · {{statusLabel .Status}}</li>
+      {{end}}
+    </ol>
+    {{if .Build.Error}}<p class="banner banner-bad">{{.Build.Error}}</p>{{end}}
+    <h2>Log</h2>
+    {{if .Logs}}
+    <pre class="log">{{range .Logs}}{{.Line}}
+{{end}}</pre>
+    {{else}}<p class="hint">Belum ada baris log.</p>{{end}}
+  </section>
+  <aside>
+    {{if can .Account "builds.rerun"}}
+    <form class="panel" method="post" action="/app/builds/{{.Build.ID}}/rerun" data-confirm="Jalankan ulang commit ini?">
+      <h2>Jalankan ulang</h2>
+      <p class="hint">Membuat build baru untuk commit yang sama.</p>
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <button class="btn btn-primary" type="submit">Rerun</button>
+    </form>
+    {{end}}
+    {{if .Analysis}}
+    <section class="panel">
+      <h2>Analisis</h2>
+      <p class="hint">{{.Analysis.Model}}. Bisa keliru.</p>
+      <p>{{.Analysis.Summary}}</p>
+      {{if .Analysis.Cause}}<p><strong>Kemungkinan penyebab.</strong> {{.Analysis.Cause}}</p>{{end}}
+      {{range .Analysis.Lines}}<p class="quote meta">{{.Line}}</p>{{end}}
+    </section>
+    {{end}}
+    {{if .Similar}}
+    <section class="panel">
+      <h2>Kegagalan serupa</h2>
+      <p class="hint">Risiko berulang. Pola ini mirip dengan kegagalan yang sudah tersimpan.</p>
+      {{range .Similar}}
+      <p><a class="rowlink" href="/app/builds/{{.BuildID}}">Build #{{.BuildID}}</a> · {{.Repository}} · {{.Match}}%</p>
+      <p class="hint">{{.Summary}}</p>
+      {{end}}
+    </section>
+    {{end}}
+  </aside>
+</div>
+{{template "end" .}}
+{{end}}
+
+{{define "integrations"}}
+{{template "start" .}}
+<div class="page-head">
+  <div>
+    <h1>Integrasi</h1>
+    <p>Status dibaca tanpa menjalankan model. Uji koneksi menghasilkan satu balasan pendek.</p>
+  </div>
+</div>
+{{template "flash" .}}
+<article class="panel" data-ai-status>
+  <div class="page-head">
+    <h2>AI service</h2>
+    <span class="pill pill-neutral" data-ai-pill>Memeriksa</span>
+  </div>
+  <p class="hint" data-ai-loading>Membaca status…</p>
+  <div data-ai-body hidden>
+    <dl class="facts" data-ai-facts></dl>
+    <p class="ai-error" data-ai-error hidden></p>
+  </div>
+  {{if can .Account "integrations.test"}}
+  <p><button class="btn btn-primary" type="button" data-ai-test data-csrf="{{.CSRF}}">Uji koneksi</button></p>
+  <p class="hint" data-ai-test-out hidden></p>
+  {{else}}
+  <p class="hint">Peran Anda bisa melihat status, bukan menjalankan uji.</p>
+  {{end}}
+</article>
+{{template "end" .}}
+{{end}}

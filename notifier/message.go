@@ -61,7 +61,7 @@ func formatMessage(b store.Build, failed *store.Step, tail []store.LogLine, anal
 	}
 
 	if publicURL != "" {
-		logsURL := fmt.Sprintf("%s/api/builds/%d/logs?format=text", publicURL, b.ID)
+		logsURL := fmt.Sprintf("%s/app/builds/%d", publicURL, b.ID)
 		fmt.Fprintf(&sb, "<a href=\"%s\">Full logs</a>", esc(logsURL))
 	}
 

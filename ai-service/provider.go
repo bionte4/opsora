@@ -13,8 +13,14 @@ import (
 	"time"
 )
 
-// provider is a chat model backend. Only Ollama exists today; hosted APIs
-// can be added behind the same interface.
+const embedDimensions = 768
+
+// errEmbedDisabled means AI_EMBED_MODEL is empty, so similar-failure search
+// stays off and analysis still succeeds.
+var errEmbedDisabled = errors.New("embeddings are not configured")
+
+// provider is a chat model backend. Ollama runs on a machine you control.
+// "openai" speaks the OpenAI-compatible HTTP API used by Groq and OpenAI.
 type provider interface {
 	Name() string
 	Model() string
@@ -25,6 +31,8 @@ type provider interface {
 	// Chat returns the assistant reply. A non-nil schema asks for JSON that
 	// matches it.
 	Chat(ctx context.Context, system, user string, schema any) (string, error)
+	// Embed returns a 768-dimensional vector, or errEmbedDisabled.
+	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
 type providerInfo struct {
@@ -33,17 +41,19 @@ type providerInfo struct {
 }
 
 type ollama struct {
-	baseURL   string
-	model     string
-	keepAlive string
-	client    *http.Client
+	baseURL    string
+	model      string
+	embedModel string
+	keepAlive  string
+	client     *http.Client
 }
 
-func newOllama(baseURL, model, keepAlive string) *ollama {
+func newOllama(baseURL, model, embedModel, keepAlive string) *ollama {
 	return &ollama{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		model:     model,
-		keepAlive: keepAlive,
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		model:      model,
+		embedModel: embedModel,
+		keepAlive:  keepAlive,
 		// Generations are bounded by the caller's context; this only caps
 		// a server that accepts the connection and never answers.
 		client: &http.Client{Timeout: 10 * time.Minute},
@@ -114,6 +124,31 @@ func (o *ollama) Chat(ctx context.Context, system, user string, schema any) (str
 		return "", err
 	}
 	return resp.Message.Content, nil
+}
+
+func (o *ollama) Embed(ctx context.Context, text string) ([]float32, error) {
+	if o.embedModel == "" {
+		return nil, errEmbedDisabled
+	}
+	body, err := json.Marshal(map[string]string{"model": o.embedModel, "prompt": text})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	var resp struct {
+		Embedding []float32 `json:"embedding"`
+	}
+	if err := o.do(req, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Embedding) != embedDimensions {
+		return nil, fmt.Errorf("embedding length %d, want %d", len(resp.Embedding), embedDimensions)
+	}
+	return resp.Embedding, nil
 }
 
 func (o *ollama) get(ctx context.Context, path string, out any) error {

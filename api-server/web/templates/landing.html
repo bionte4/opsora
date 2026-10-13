@@ -1,0 +1,98 @@
+{{define "landing"}}
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Opsora · CI yang selesai di tempat tim sudah berada</title>
+  <meta name="description" content="Opsora menerima webhook GitHub, menjalankan pipeline di container, lalu mengirim hasil, analisis, dan rollback lewat Telegram.">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<a class="skip" href="#isi">Langsung ke isi</a>
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="/"><span class="mark" aria-hidden="true"><span></span></span>Opsora</a>
+    <button class="btn btn-ghost nav-toggle" type="button" data-nav-toggle aria-expanded="false" aria-controls="nav">Menu</button>
+    <nav class="nav" id="nav" data-nav>
+      <a href="#fitur">Fitur</a>
+      <a href="#integrasi">Integrasi</a>
+      <div class="header-actions">
+        {{if .Account}}
+        <a class="btn btn-primary" href="/app">Buka dasbor</a>
+        {{else}}
+        <a class="btn btn-ghost" href="/login">Masuk</a>
+        <a class="btn btn-primary" href="/login">Mulai</a>
+        {{end}}
+      </div>
+    </nav>
+  </div>
+</header>
+<main id="isi">
+  <div class="wrap hero">
+    <div>
+      <p class="kicker">Platform CI mandiri</p>
+      <h1>Build selesai. Tim langsung tahu.</h1>
+      <p class="lede">Opsora menerima push dari GitHub, menjalankan setiap langkah di container terpisah, lalu mengirim hasilnya ke Telegram. Kalau gagal, penyebabnya dikutip dari log. Kalau rilis rusak, satu perintah mengembalikan versi sebelumnya.</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="/login">Masuk ke konsol</a>
+        <a class="btn btn-ghost" href="#integrasi">Cek integrasi</a>
+      </div>
+      <p class="hero-note">Berjalan di mesin Anda. Postgres menyimpan status. Redis hanya membawa antrean.</p>
+    </div>
+    <div class="preview" aria-hidden="true">
+      <div class="preview-bar"><i></i><i></i><i></i></div>
+      <div class="preview-body">
+        <div class="mock-row"><span class="pill pill-ok">lulus</span><div><div class="repo">acme/web</div><div class="meta">main · 4f58770</div></div><span class="meta">2m 01s</span></div>
+        <div class="mock-row"><span class="pill pill-bad">gagal</span><div><div class="repo">acme/api</div><div class="meta">unit tests · exit 1</div></div><span class="meta">13s</span></div>
+        <div class="mock-row"><span class="pill pill-warn">rollback</span><div><div class="repo">acme/api:current</div><div class="meta">kembali ke rilis aktif</div></div><span class="meta">siap</span></div>
+      </div>
+    </div>
+  </div>
+
+  <section class="section" id="fitur">
+    <div class="wrap">
+      <h2>Satu jalur, dari push sampai rilis.</h2>
+      <p class="section-lead">Setiap bagian dipakai setelah yang sebelumnya menghasilkan data sungguhan. Tidak ada kotak yang hanya tampil di diagram.</p>
+      <div class="features">
+        <article class="feature"><h3>Pipeline di container</h3><p>File <span class="meta">.opsora.yml</span> menentukan image dan langkah. Satu container per langkah, tanpa soket Docker dan tanpa rahasia platform.</p></article>
+        <article class="feature"><h3>Status di GitHub</h3><p>Commit mendapat status pending, lalu hijau atau merah. Log tiap langkah bisa diikuti dari konsol.</p></article>
+        <article class="feature"><h3>Telegram</h3><p>Satu pesan per build: repositori, commit, langkah yang gagal, dan kutipan log. Chat lain tidak bisa memberi perintah.</p></article>
+        <article class="feature"><h3>Analisis kegagalan</h3><p>Model menjelaskan langkah yang gagal dan menunjuk baris log. Nomor baris dicek, jadi kutipan tidak dikarang.</p></article>
+        <article class="feature"><h3>ChatOps</h3><p><span class="meta">/status</span>, <span class="meta">/logs</span>, <span class="meta">/rerun</span>, dan <span class="meta">/rollback</span> lewat bot yang sama. Perintah masuk ke API, bukan ke Redis.</p></article>
+        <article class="feature"><h3>Deploy dan rollback</h3><p>Image ditandai dengan commit. Kalau container baru mati, rilis sebelumnya tetap aktif dan bisa dinyalakan lagi.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="integrasi">
+    <div class="wrap integration">
+      <div>
+        <h2>Kartu integrasi, langsung dari layanan yang hidup.</h2>
+        <p class="section-lead">Status di bawah dibaca dari AI service saat halaman ini dibuka. Menguji generasi model butuh masuk sebagai peran yang diizinkan, supaya laptop tidak memuat model untuk setiap pengunjung.</p>
+        {{if .Account}}<a class="btn btn-primary" href="/app/integrations">Buka kartu uji</a>{{else}}<a class="btn btn-primary" href="/login?next=/app/integrations">Masuk untuk menguji</a>{{end}}
+      </div>
+      <article class="panel" data-ai-status>
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center">
+          <h3 style="margin:0">AI service</h3>
+          <span class="pill pill-neutral" data-ai-pill>Memeriksa</span>
+        </div>
+        <p class="hint" data-ai-loading>Membaca status…</p>
+        <div data-ai-body hidden>
+          <dl class="facts" data-ai-facts></dl>
+          <p class="ai-error" data-ai-error hidden></p>
+        </div>
+      </article>
+    </div>
+  </section>
+</main>
+<footer class="site-footer">
+  <div class="wrap">
+    <span>Opsora</span>
+    <a href="/health">Status mesin</a>
+  </div>
+</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}

@@ -107,3 +107,21 @@ func (a *app) getBuildAnalysis(c *fiber.Ctx) error {
 	}
 	return c.JSON(analysis)
 }
+
+func (a *app) similarFailures(c *fiber.Ctx) error {
+	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil || id < 1 {
+		return jsonError(c, fiber.StatusBadRequest, "invalid build id")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	similar, err := a.store.SimilarFailures(ctx, id)
+	if err != nil {
+		log.Printf("similar %d: %v", id, err)
+		return jsonError(c, fiber.StatusInternalServerError, "failed to search similar failures")
+	}
+	if similar == nil {
+		similar = []store.SimilarFailure{}
+	}
+	return c.JSON(fiber.Map{"build_id": id, "similar": similar})
+}

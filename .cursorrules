@@ -1,0 +1,28 @@
+# .cursorrules - DevOps All-In-One Platform
+
+
+devops-allinone/
+├── .cursorrules             # Master prompt & aturan AI untuk project ini
+├── docker-compose.yml       # Infrastruktur lokal (PostgreSQL + pgvector, Redis)
+├── api-server/              # Go API Server (Central Orchestrator)
+├── worker/                  # Build Worker & CI/CD Executor
+├── ai-service/              # Modul AI (Log Analyzer & Risk Scorer)
+└── chatops/                 # Bot Telegram & Notifikasi
+
+
+## Project Overview
+You are building an "AI-Powered DevOps All-In-One Platform". The system orchestrates GitHub webhooks, manages CI/CD pipelines via Redis queues, analyzes logs and scores deployment risks using an AI service, and communicates operational alerts through Telegram ChatOps.
+
+## Tech Stack & Architecture
+- **API Server & Orchestrator:** Go (Golang) using Fiber or Gin framework.
+- **Queue & Message Broker:** Redis (handling background jobs, pub/sub for build workers).
+- **Database & Vector Store:** PostgreSQL with `pgvector` extension for RAG and embedding storage.
+- **Worker Node:** Go-based background worker executing pipeline tasks and Docker CLI commands.
+- **AI Service:** Python (FastAPI) or Go integration connecting to LLM APIs for log parsing, anomaly detection, and risk scoring.
+- **ChatOps:** Telegram Bot API for real-time notifications and interactive operational commands.
+
+## Code Quality & Guidelines
+1. **Modularity:** Keep packages decoupled. The API server talks to Redis/PostgreSQL, never directly executes heavy build worker tasks synchronously.
+2. **Error Handling:** Always handle errors gracefully with clear contextual logging. Never ignore errors in Go (`if err != nil`).
+3. **Security:** Secure webhook endpoints using HMAC SHA-256 signature verification from GitHub. Never hardcode secrets; use environment variables (`.env`).
+4. **Documentation:** Every service must include a clear `README.md` and inline comments explaining core logic.

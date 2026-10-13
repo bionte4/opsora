@@ -5,9 +5,9 @@ runs each build's steps in isolated Docker containers, reports the result back
 to GitHub as a commit status, announces it on Telegram with an AI explanation
 of failures, and exposes metrics to Prometheus and Grafana.
 
-It is the first part of a larger "DevOps all-in-one" platform. Deployments,
-ChatOps, search over past failures with pgvector, and change risk scores are
-planned but not built yet.
+It is the first part of a larger "DevOps all-in-one" platform. Similar past
+failures are searchable with pgvector when an embedding model is configured.
+Calibrated change-risk scores are not built yet.
 
 ## How it works
 
@@ -28,7 +28,8 @@ api-server, worker, notifier, ai-service ──/metrics──▶ Prometheus ─�
 
 - **api-server** checks the webhook signature, records the delivery (duplicate
   deliveries are ignored), stores a build in Postgres and pushes its ID to
-  Redis. It also serves a small read-only API for builds and logs.
+  Redis. It also serves the landing page, the signed-in console, and the
+  builds API.
 - **worker** takes build IDs from Redis, claims the build in Postgres, clones
   the commit into a fresh Docker volume, and runs the steps from
   `.opsora.yml`, each in its own container.
@@ -65,7 +66,8 @@ api-server, worker, notifier, ai-service ──/metrics──▶ Prometheus ─�
 ## Quick start
 
 Requirements: Docker with Compose, and a GitHub repository you can configure
-webhooks for.
+webhooks for. Minimum hardware and the VPS steps are in
+[Deploy on a VPS](docs/deploy-vps.md).
 
 ```sh
 cp .env.example .env
@@ -75,9 +77,22 @@ docker compose up -d --build
 
 | Service    | URL                     |
 | ---------- | ----------------------- |
-| API        | http://localhost:8080   |
+| Console    | http://localhost:8080   |
 | Prometheus | http://localhost:9090   |
 | Grafana    | http://localhost:3000   |
+
+Open the console and sign in. The first API start creates one admin when no
+users exist yet:
+
+| Field    | Default              |
+| -------- | -------------------- |
+| Email    | `admin@opsora.local` |
+| Password | `change-me`          |
+
+Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env` before that first start if you
+do not want the defaults. Later starts do not reset the account. Change the
+password from **Pengguna** in the console, or set a new `ADMIN_PASSWORD` only
+on a database that still has no users.
 
 Check that the API can reach its datastores:
 
@@ -122,8 +137,8 @@ show the error. Cited line numbers are checked against the log, and the
 Telegram message quotes those lines so readers can verify the explanation.
 Each analysis is stored, so a build is analyzed once.
 
-It uses [Ollama](https://ollama.com) on the host, because Docker on macOS
-cannot use the GPU:
+By default it uses [Ollama](https://ollama.com) on the host, because Docker on
+macOS cannot use the GPU:
 
 ```sh
 ollama pull phi3
@@ -134,6 +149,20 @@ Set `AI_MODEL` to use another installed model and `AI_LANGUAGE` (for example
 8 GB of RAM, phi3 takes about 25 seconds per analysis and holds about 4 GB
 while loaded; `AI_KEEP_ALIVE` (default `2m`) controls how soon it is unloaded.
 To turn analysis off, set `AI_SERVICE_URL=` (empty) in `.env`.
+
+To use a hosted model instead, set `AI_PROVIDER=openai`, `AI_BASE_URL` to an
+OpenAI-compatible endpoint, and `AI_API_KEY`. Groq's free tier is
+`https://api.groq.com/openai/v1` with a model such as `llama-3.1-8b-instant`.
+The same integration card and connection test then talk to that provider. The
+key is not logged. The request includes about 60 lines of the failed step's
+log.
+
+Set `AI_EMBED_MODEL` to store a vector of each explanation and show similar
+past failures on the build page. For Ollama that model is `nomic-embed-text`
+(`ollama pull nomic-embed-text`). The vector is 768 dimensions. A match of
+75% or more is listed, and the page calls that a repeated-failure risk. It is
+similarity to explanations already stored, not a prediction about the diff.
+Hosted chat providers that have no embeddings API leave this blank.
 
 Log output is treated as untrusted data in the prompt, but a model can still be
 misled by it, so messages label the analysis "may be wrong".
@@ -207,16 +236,57 @@ steps:
 
 This repository builds itself with its own [`.opsora.yml`](.opsora.yml).
 
+## Web console
+
+Who can sign in, and what each role does next, is in [Console flows](docs/alur-konsol.md).
+
+`GET /` is the public landing page. The signed-in console is under `/app`.
+Pages are server-rendered and the copy is Indonesian. A session cookie lasts
+14 days. Forms send a CSRF token that must match the `opsora_csrf` cookie.
+
+| Page            | Path                 | Who can open it                          |
+| --------------- | -------------------- | ---------------------------------------- |
+| Dashboard       | `/app`               | anyone signed in; build numbers need `builds.read` |
+| Build list      | `/app/builds`        | `builds.read`                            |
+| Build detail    | `/app/builds/:id`    | `builds.read`; rerun needs `builds.rerun` |
+| Users           | `/app/users`         | `users.read`; create and edit need `users.write` |
+| Roles           | `/app/roles`         | `roles.read`; create and edit need `roles.write` |
+| Integrations    | `/app/integrations`  | `integrations.read`; the test button needs `integrations.test` |
+
+The landing page shows whether the AI service is reachable. Generating a test
+reply is only available after sign-in, so an anonymous visit does not load the
+model.
+
+Each user has one role. The built-in roles are rewritten from code on every
+start:
+
+| Role       | Permissions                                                                 |
+| ---------- | --------------------------------------------------------------------------- |
+| `admin`    | everything below                                                            |
+| `operator` | `builds.read`, `builds.rerun`, `integrations.read`, `integrations.test`    |
+| `viewer`   | `builds.read`, `integrations.read`                                          |
+
+Custom roles are created in the console. Names are lowercase letters, digits,
+and hyphens, and cannot be `admin`, `operator`, or `viewer`. System roles
+cannot be edited or deleted. A role that still has users cannot be deleted.
+The last active admin cannot be demoted, disabled, or deleted, and you cannot
+delete the account you are signed in with.
+
+The password is never logged. A warning is printed when `ADMIN_PASSWORD` is
+still `change-me`. Health checks stay at `GET /health` and still return JSON.
+
 ## API
 
 | Method | Path                       | Description                                              |
 | ------ | -------------------------- | -------------------------------------------------------- |
+| GET    | `/`                        | Public landing page                                      |
 | GET    | `/health`                  | API, Postgres and Redis status                           |
 | POST   | `/api/webhook/github`      | GitHub webhook receiver (`push`, `pull_request`)         |
-| GET    | `/api/builds?limit=20`     | Latest builds (limit 1 to 100)                           |
-| GET    | `/api/builds/:id`          | One build with its steps                                 |
-| GET    | `/api/builds/:id/logs`     | Logs; `step=<position>`, `after=<id>`, `limit`, `format=text` |
+| GET    | `/api/builds?limit=20`     | Latest builds. Session with `builds.read`, or `Authorization: Bearer $API_READ_TOKEN` |
+| GET    | `/api/builds/:id`          | One build with its steps. Same authentication            |
+| GET    | `/api/builds/:id/logs`     | Logs; `step=<position>`, `after=<id>`, `limit`, `format=text`. Same authentication |
 | GET    | `/api/builds/:id/analysis` | AI analysis of a failed build, with the cited log lines  |
+| GET    | `/api/builds/:id/similar`  | Up to three earlier failures with a similar explanation  |
 | GET    | `/api/integrations/ai`     | AI integration status: reachable, model installed, latency |
 | POST   | `/api/integrations/ai/test` | Test connection: runs a tiny generation (can take ~10s) |
 | GET    | `/api/chatops/builds`      | Latest builds. Requires `Authorization: Bearer $CHATOPS_TOKEN` and header `X-Opsora-Chat-Id` |
@@ -262,7 +332,7 @@ The code is a Go workspace (`go.work`) with five modules:
 
 | Module        | Contents                                                       |
 | ------------- | -------------------------------------------------------------- |
-| `api-server/` | Fiber HTTP server: webhook, builds API, request metrics        |
+| `api-server/` | Fiber HTTP server: landing page, console, webhook, builds API |
 | `worker/`     | Queue consumer, pipeline runner, Docker client, GitHub statuses |
 | `notifier/`   | Telegram notifications                                         |
 | `ai-service/` | Failure analysis with a language model (Ollama)                |
@@ -297,7 +367,12 @@ Container images are built from the single root `Dockerfile` with
   only build repositories you trust. A `deploy` section runs `docker build` on
   that daemon, so a Dockerfile can do more than a pipeline step can.
 - Chat commands are rejected unless the chat ID is in `CHATOPS_ALLOWED_CHATS`
-  and the caller presents `CHATOPS_TOKEN`. The build and log read API is still
-  open on the host port; do not expose it publicly without a reverse proxy.
+  and the caller presents `CHATOPS_TOKEN`. `GET /api/builds` requires a
+  signed-in user with `builds.read`, or `Authorization: Bearer $API_READ_TOKEN`
+  when that variable is set. GitHub and Telegram links point at `/app/builds/:id`,
+  which asks the reader to sign in. The landing page and `GET /health` stay
+  public. Postgres, Redis, Prometheus and Grafana listen on `127.0.0.1` only.
+- Change `ADMIN_PASSWORD` before anyone else can reach port 8080. The default
+  admin is only created when the users table is empty.
 - Never commit `.env`; it is ignored by git and excluded from Docker builds.
 - Change the default Postgres and Redis passwords before exposing the host.

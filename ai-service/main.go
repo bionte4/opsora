@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,16 +68,10 @@ func main() {
 	databaseURL := env.Or("DATABASE_URL", defaultDatabaseURL)
 	port := env.Or("PORT", "8090")
 
-	if name := env.Or("AI_PROVIDER", "ollama"); name != "ollama" {
-		log.Fatalf("AI_PROVIDER %q is not supported; available: ollama", name)
+	p, err := newProvider()
+	if err != nil {
+		log.Fatalf("provider: %v", err)
 	}
-	// A loaded phi3 holds about 4 GB; on small machines unload it soon after
-	// the last request rather than keep the host swapping.
-	keepAlive := env.Or("AI_KEEP_ALIVE", "2m")
-	if _, err := time.ParseDuration(keepAlive); err != nil {
-		log.Fatalf("AI_KEEP_ALIVE must be a duration like 2m")
-	}
-	p := newOllama(env.Or("OLLAMA_URL", "http://localhost:11434"), env.Or("AI_MODEL", "phi3"), keepAlive)
 
 	timeout, err := time.ParseDuration(env.Or("AI_TIMEOUT", "120s"))
 	if err != nil || timeout <= 0 {
@@ -96,6 +92,7 @@ func main() {
 	}
 	poolConfig.ConnConfig.ConnectTimeout = dbTimeout
 	poolConfig.ConnConfig.RuntimeParams["statement_timeout"] = "5000"
+	store.EnableVector(poolConfig)
 	db, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		log.Fatalf("connect postgres: %v", err)
@@ -247,6 +244,9 @@ func (s *service) analyze(c *fiber.Ctx) error {
 			a.BuildID, a.Provider, a.Model = id, s.provider.Name(), s.provider.Model()
 			a.DurationMS = int(time.Since(start).Milliseconds())
 			err = s.store.SaveAnalysis(ctx, a)
+			if err == nil {
+				s.rememberEmbedding(ctx, id, a.Summary+"\n"+a.Cause)
+			}
 		}
 	}
 	if err != nil {
@@ -272,6 +272,41 @@ func (s *service) analyze(c *fiber.Ctx) error {
 
 // generate waits for a free model slot, then calls the provider. Time spent
 // waiting counts against ctx.
+func (s *service) rememberEmbedding(ctx context.Context, id int64, text string) {
+	vec, err := s.provider.Embed(ctx, text)
+	if errors.Is(err, errEmbedDisabled) {
+		return
+	}
+	if err != nil {
+		log.Printf("build=%d embed: %v", id, err)
+		return
+	}
+	if err := s.store.SaveEmbedding(ctx, id, vec); err != nil {
+		log.Printf("build=%d save embedding: %v", id, err)
+	}
+}
+
+func newProvider() (provider, error) {
+	embedModel := strings.TrimSpace(os.Getenv("AI_EMBED_MODEL"))
+	switch name := env.Or("AI_PROVIDER", "ollama"); name {
+	case "ollama":
+		keepAlive := env.Or("AI_KEEP_ALIVE", "2m")
+		if _, err := time.ParseDuration(keepAlive); err != nil {
+			return nil, fmt.Errorf("AI_KEEP_ALIVE must be a duration like 2m")
+		}
+		return newOllama(env.Or("OLLAMA_URL", "http://localhost:11434"), env.Or("AI_MODEL", "phi3"), embedModel, keepAlive), nil
+	case "openai":
+		base := strings.TrimSpace(os.Getenv("AI_BASE_URL"))
+		key := strings.TrimSpace(os.Getenv("AI_API_KEY"))
+		if base == "" || key == "" {
+			return nil, fmt.Errorf("AI_PROVIDER=openai requires AI_BASE_URL and AI_API_KEY")
+		}
+		return newOpenAI(base, key, env.Or("AI_MODEL", "llama-3.1-8b-instant"), embedModel), nil
+	default:
+		return nil, fmt.Errorf("AI_PROVIDER %q is not supported; available: ollama, openai", name)
+	}
+}
+
 func (s *service) generate(ctx context.Context, kind, system, user string, schema any) (string, error) {
 	start := time.Now()
 	defer func() { aiDuration.WithLabelValues(kind).Observe(time.Since(start).Seconds()) }()

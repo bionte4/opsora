@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"log"
 	"os"
 	"strconv"
@@ -43,6 +44,9 @@ type app struct {
 	secret       string
 	chatopsToken string
 	allowedChats map[string]struct{}
+	views        *template.Template
+	ai           *aiIntegration
+	apiReadToken string
 }
 
 type githubPayload struct {
@@ -83,7 +87,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	db, err := pgxpool.New(ctx, databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		log.Fatalf("postgres: %v", err)
+	}
+	store.EnableVector(poolConfig)
+	db, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		log.Fatalf("postgres: %v", err)
 	}
@@ -109,10 +118,22 @@ func main() {
 		db: db, store: store.New(db), redis: rdb, secret: webhookSecret,
 		chatopsToken: strings.TrimSpace(os.Getenv("CHATOPS_TOKEN")),
 		allowedChats: allowedChatSet(os.Getenv("CHATOPS_ALLOWED_CHATS")),
+		apiReadToken: strings.TrimSpace(os.Getenv("API_READ_TOKEN")),
 	}
 	if srv.chatopsToken == "" {
 		log.Printf("CHATOPS_TOKEN not set: chat commands are disabled")
 	}
+	if srv.apiReadToken == "" {
+		log.Printf("API_READ_TOKEN not set: the builds API requires a signed-in session")
+	}
+	if err := srv.ensureAdmin(ctx); err != nil {
+		log.Fatalf("admin console: %v", err)
+	}
+	views, err := parseViews()
+	if err != nil {
+		log.Fatalf("templates: %v", err)
+	}
+	srv.views = views
 
 	registerQueueGauges(rdb)
 	go metrics.Serve(context.Background(), metricsAddr)
@@ -123,17 +144,30 @@ func main() {
 	fiberApp.Use(recover.New())
 	fiberApp.Use(metricsMiddleware)
 	fiberApp.Use(logger.New())
-	fiberApp.Get("/", srv.health)
+	fiberApp.Use(func(c *fiber.Ctx) error {
+		c.Set("X-Content-Type-Options", "nosniff")
+		return c.Next()
+	})
+	if err := mountStatic(fiberApp); err != nil {
+		log.Fatalf("static files: %v", err)
+	}
+	fiberApp.Get("/", srv.pageLanding)
 	fiberApp.Get("/health", srv.health)
+	fiberApp.Get("/login", srv.pageLogin)
+	fiberApp.Post("/login", srv.submitLogin)
+	fiberApp.Post("/logout", srv.submitLogout)
 	fiberApp.Post("/api/webhook/github", srv.githubWebhook)
-	fiberApp.Get("/api/builds", srv.listBuilds)
-	fiberApp.Get("/api/builds/:id", srv.getBuild)
-	fiberApp.Get("/api/builds/:id/logs", srv.getBuildLogs)
-	fiberApp.Get("/api/builds/:id/analysis", srv.getBuildAnalysis)
 
-	ai := newAIIntegration(os.Getenv("AI_SERVICE_URL"))
-	fiberApp.Get("/api/integrations/ai", ai.status)
-	fiberApp.Post("/api/integrations/ai/test", ai.test)
+	srv.ai = newAIIntegration(os.Getenv("AI_SERVICE_URL"))
+	fiberApp.Get("/api/integrations/ai", srv.ai.status)
+	fiberApp.Post("/api/integrations/ai/test", srv.requireAPI("integrations.test"), srv.ai.test)
+
+	builds := fiberApp.Group("/api/builds", srv.requireAPI("builds.read"))
+	builds.Get("/", srv.listBuilds)
+	builds.Get("/:id", srv.getBuild)
+	builds.Get("/:id/logs", srv.getBuildLogs)
+	builds.Get("/:id/analysis", srv.getBuildAnalysis)
+	builds.Get("/:id/similar", srv.similarFailures)
 
 	chat := fiberApp.Group("/api/chatops", srv.authorizeChat)
 	chat.Get("/builds", srv.chatopsStatus)
@@ -142,6 +176,26 @@ func main() {
 	chat.Post("/builds/:id/rerun", srv.chatopsRerun)
 	chat.Post("/rollback", srv.chatopsRollback)
 	chat.Get("/jobs/:id", srv.chatopsJob)
+
+	ui := fiberApp.Group("/app", srv.requireUser)
+	ui.Get("/", srv.pageDashboard)
+	ui.Get("/builds", srv.requirePerm("builds.read"), srv.pageBuilds)
+	ui.Get("/builds/:id", srv.requirePerm("builds.read"), srv.pageBuild)
+	ui.Post("/builds/:id/rerun", srv.requirePerm("builds.rerun"), srv.submitRerun)
+	ui.Get("/users", srv.requirePerm("users.read"), srv.pageUsers)
+	ui.Get("/users/new", srv.requirePerm("users.write"), srv.pageUserNew)
+	ui.Post("/users", srv.requirePerm("users.write"), srv.submitUser)
+	ui.Get("/users/:id", srv.requirePerm("users.write"), srv.pageUserEdit)
+	ui.Post("/users/:id", srv.requirePerm("users.write"), srv.submitUser)
+	ui.Post("/users/:id/delete", srv.requirePerm("users.write"), srv.deleteUser)
+	ui.Get("/roles", srv.requirePerm("roles.read"), srv.pageRoles)
+	ui.Get("/roles/new", srv.requirePerm("roles.write"), srv.pageRoleNew)
+	ui.Post("/roles", srv.requirePerm("roles.write"), srv.submitRole)
+	ui.Get("/roles/:id", srv.requirePerm("roles.read"), srv.pageRoleEdit)
+	ui.Post("/roles/:id", srv.requirePerm("roles.write"), srv.submitRole)
+	ui.Post("/roles/:id/delete", srv.requirePerm("roles.write"), srv.deleteRole)
+	ui.Get("/integrations", srv.requirePerm("integrations.read"), srv.pageIntegrations)
+	ui.Post("/integrations/ai/test", srv.requirePerm("integrations.test"), srv.submitAITest)
 
 	log.Printf("listening on :%s", port)
 	if err := fiberApp.Listen(":" + port); err != nil {

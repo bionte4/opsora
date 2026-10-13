@@ -1,0 +1,56 @@
+{{define "start"}}
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · Opsora</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<a class="skip" href="#isi">Langsung ke isi</a>
+<div class="app-shell">
+  {{template "sidebar" .}}
+  <div class="backdrop" data-backdrop hidden></div>
+  <div class="canvas">
+    <header class="topbar">
+      <button class="menu-btn" type="button" data-drawer aria-label="Buka menu">Menu</button>
+      <strong>{{.Title}}</strong>
+    </header>
+    <main class="content" id="isi">
+{{end}}
+
+{{define "end"}}
+    </main>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}
+
+{{define "sidebar"}}
+<aside class="sidebar" data-sidebar>
+  <a class="brand" href="/app"><span class="mark" aria-hidden="true"><span></span></span>Opsora</a>
+  <nav class="side-nav">
+    <a class="{{if eq .Nav "dashboard"}}is-active{{end}}" href="/app">Dasbor</a>
+    {{if can .Account "builds.read"}}<a class="{{if eq .Nav "builds"}}is-active{{end}}" href="/app/builds">Build</a>{{end}}
+    {{if can .Account "users.read"}}<a class="{{if eq .Nav "users"}}is-active{{end}}" href="/app/users">Pengguna</a>{{end}}
+    {{if can .Account "roles.read"}}<a class="{{if eq .Nav "roles"}}is-active{{end}}" href="/app/roles">Peran</a>{{end}}
+    {{if can .Account "integrations.read"}}<a class="{{if eq .Nav "integrations"}}is-active{{end}}" href="/app/integrations">Integrasi</a>{{end}}
+  </nav>
+  <div class="sidebar-foot">
+    <span class="who">{{.Account.Name}}</span>
+    <span class="role">{{.Account.RoleName}}</span>
+    <form method="post" action="/logout">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="btn btn-ghost btn-small" type="submit">Keluar</button>
+    </form>
+  </div>
+</aside>
+{{end}}
+
+{{define "flash"}}
+{{if .Flash}}<p class="banner banner-ok" role="status">{{.Flash}}</p>{{end}}
+{{if .Error}}<p class="banner banner-bad" role="alert">{{.Error}}</p>{{end}}
+{{end}}

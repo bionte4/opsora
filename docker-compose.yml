@@ -19,7 +19,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-opsora}
       POSTGRES_DB: ${POSTGRES_DB:-opsora}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -42,7 +42,7 @@ services:
     environment:
       REDISCLI_AUTH: ${REDIS_PASSWORD:-opsora}
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -66,6 +66,9 @@ services:
       AI_SERVICE_URL: ${AI_SERVICE_URL-http://ai-service:8090}
       CHATOPS_TOKEN: ${CHATOPS_TOKEN:-}
       CHATOPS_ALLOWED_CHATS: ${CHATOPS_ALLOWED_CHATS:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@opsora.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
+      API_READ_TOKEN: ${API_READ_TOKEN:-}
       METRICS_ADDR: ":9101"
     ports:
       - "${API_PORT:-8080}:8080"
@@ -129,6 +132,9 @@ services:
       DATABASE_URL: *database-url
       AI_PROVIDER: ${AI_PROVIDER:-ollama}
       AI_MODEL: ${AI_MODEL:-phi3}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_EMBED_MODEL: ${AI_EMBED_MODEL:-}
       AI_LANGUAGE: ${AI_LANGUAGE:-English}
       AI_TIMEOUT: ${AI_TIMEOUT:-120s}
       AI_KEEP_ALIVE: ${AI_KEEP_ALIVE:-2m}
@@ -153,7 +159,7 @@ services:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
       interval: 5s
@@ -174,7 +180,7 @@ services:
       - ./docker/grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     depends_on:
       prometheus:
         condition: service_healthy
