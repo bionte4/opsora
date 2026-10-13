@@ -300,7 +300,9 @@ func (s *Store) AppendLogs(ctx context.Context, buildID int64, lines []LogLine) 
 // NotifyNext locks the oldest finished build that has not been announced yet,
 // calls send, and marks the build announced only if send succeeds. The row
 // stays locked while send runs, so concurrent notifiers never announce the
-// same build. It reports false when no build is waiting. Builds that finished
+// same build. The lock is FOR NO KEY UPDATE so send can still insert rows
+// that reference the build, such as its AI analysis. It reports false when
+// no build is waiting. Builds that finished
 // longer ago than maxAge are skipped so a notifier enabled late does not flood
 // the chat with old results.
 func (s *Store) NotifyNext(ctx context.Context, statuses []string, maxAge time.Duration, send func(Build) error) (bool, error) {
@@ -316,7 +318,7 @@ func (s *Store) NotifyNext(ctx context.Context, statuses []string, maxAge time.D
 			AND finished_at > now() - make_interval(secs => $2)
 		ORDER BY finished_at
 		LIMIT 1
-		FOR UPDATE SKIP LOCKED`, statuses, maxAge.Seconds()))
+		FOR NO KEY UPDATE SKIP LOCKED`, statuses, maxAge.Seconds()))
 	if errors.Is(err, ErrNotFound) {
 		return false, nil
 	}

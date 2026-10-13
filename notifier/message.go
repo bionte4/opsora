@@ -12,12 +12,14 @@ import (
 // Telegram rejects messages over 4096 characters; the log tail gets whatever
 // the header leaves, minus room for the closing tags and the link.
 const (
-	maxMessage = 4096
-	maxTail    = 2500
-	maxLine    = 300
+	maxMessage          = 4096
+	maxTail             = 2500
+	maxTailWithAnalysis = 1500
+	maxLine             = 300
+	maxCitedLine        = 200
 )
 
-func formatMessage(b store.Build, failed *store.Step, tail []store.LogLine, publicURL string) string {
+func formatMessage(b store.Build, failed *store.Step, tail []store.LogLine, analysis *store.Analysis, publicURL string) string {
 	var sb strings.Builder
 	result := "passed"
 	if b.Status != store.StatusSuccess {
@@ -46,7 +48,13 @@ func formatMessage(b store.Build, failed *store.Step, tail []store.LogLine, publ
 		fmt.Fprintf(&sb, "Error: %s\n", esc(clip(b.Error, 500)))
 	}
 
-	if text := escapedTail(tail); text != "" {
+	tailBudget := maxTail
+	if analysis != nil {
+		writeAnalysis(&sb, analysis)
+		tailBudget = maxTailWithAnalysis
+	}
+
+	if text := escapedTail(tail, tailBudget); text != "" {
 		fmt.Fprintf(&sb, "<pre>%s</pre>\n", text)
 	}
 
@@ -56,22 +64,45 @@ func formatMessage(b store.Build, failed *store.Step, tail []store.LogLine, publ
 	}
 
 	msg := strings.TrimRight(sb.String(), "\n")
-	if len([]rune(msg)) > maxMessage && len(tail) > 0 {
-		// Escaping can grow the tail past the budget; drop it rather than
-		// cut through a tag.
-		return formatMessage(b, failed, nil, publicURL)
+	if len([]rune(msg)) > maxMessage {
+		// Escaping can grow text past its budget; drop whole sections rather
+		// than cut through a tag. The log tail goes first, then the analysis.
+		if len(tail) > 0 {
+			return formatMessage(b, failed, nil, analysis, publicURL)
+		}
+		if analysis != nil {
+			return formatMessage(b, failed, nil, nil, publicURL)
+		}
 	}
 	return msg
 }
 
-// escapedTail keeps the newest lines whose escaped form fits in maxTail, so
+// writeAnalysis quotes the log lines the model cited, so a reader can check
+// the explanation against the log instead of trusting it.
+func writeAnalysis(sb *strings.Builder, a *store.Analysis) {
+	fmt.Fprintf(sb, "\n<b>AI analysis</b> <i>(%s, may be wrong)</i>\n", esc(a.Model))
+	fmt.Fprintf(sb, "%s\n", esc(a.Summary))
+	if a.Cause != "" {
+		fmt.Fprintf(sb, "Likely cause: %s\n", esc(a.Cause))
+	}
+	if len(a.Lines) > 0 {
+		quoted := make([]string, len(a.Lines))
+		for i, l := range a.Lines {
+			quoted[i] = esc(clip(l.Line, maxCitedLine))
+		}
+		fmt.Fprintf(sb, "<blockquote>%s</blockquote>\n", strings.Join(quoted, "\n"))
+	}
+	sb.WriteString("\n")
+}
+
+// escapedTail keeps the newest lines whose escaped form fits in budget, so
 // entities are never cut in half.
-func escapedTail(tail []store.LogLine) string {
+func escapedTail(tail []store.LogLine, budget int) string {
 	var kept []string
 	size := 0
 	for i := len(tail) - 1; i >= 0; i-- {
 		line := esc(clip(tail[i].Line, maxLine))
-		if size+len(line)+1 > maxTail {
+		if size+len(line)+1 > budget {
 			break
 		}
 		kept = append(kept, line)

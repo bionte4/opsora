@@ -120,6 +120,11 @@ func main() {
 	fiberApp.Get("/api/builds", srv.listBuilds)
 	fiberApp.Get("/api/builds/:id", srv.getBuild)
 	fiberApp.Get("/api/builds/:id/logs", srv.getBuildLogs)
+	fiberApp.Get("/api/builds/:id/analysis", srv.getBuildAnalysis)
+
+	ai := newAIIntegration(os.Getenv("AI_SERVICE_URL"))
+	fiberApp.Get("/api/integrations/ai", ai.status)
+	fiberApp.Post("/api/integrations/ai/test", ai.test)
 
 	log.Printf("listening on :%s", port)
 	if err := fiberApp.Listen(":" + port); err != nil {

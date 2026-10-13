@@ -63,6 +63,7 @@ services:
       <<: *internal-urls
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?set GITHUB_WEBHOOK_SECRET in .env}
       PORT: "8080"
+      AI_SERVICE_URL: ${AI_SERVICE_URL-http://ai-service:8090}
       METRICS_ADDR: ":9101"
     ports:
       - "${API_PORT:-8080}:8080"
@@ -103,7 +104,32 @@ services:
       TELEGRAM_API_URL: ${TELEGRAM_API_URL:-https://api.telegram.org}
       TELEGRAM_NOTIFY: ${TELEGRAM_NOTIFY:-all}
       OPSORA_PUBLIC_URL: ${OPSORA_PUBLIC_URL:-}
+      AI_SERVICE_URL: ${AI_SERVICE_URL-http://ai-service:8090}
       METRICS_ADDR: ":9103"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ai-service:
+    build:
+      context: .
+      args:
+        SERVICE: ai-service
+    image: opsora/ai-service:dev
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: *database-url
+      AI_PROVIDER: ${AI_PROVIDER:-ollama}
+      AI_MODEL: ${AI_MODEL:-phi3}
+      AI_LANGUAGE: ${AI_LANGUAGE:-English}
+      AI_TIMEOUT: ${AI_TIMEOUT:-120s}
+      AI_KEEP_ALIVE: ${AI_KEEP_ALIVE:-2m}
+      # Ollama runs on the host: Docker on macOS cannot use the GPU.
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      PORT: "8090"
+      METRICS_ADDR: ":9104"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

@@ -47,6 +47,8 @@ type notifier struct {
 	telegram  *telegram
 	statuses  []string
 	publicURL string
+	ai        *aiClient
+	aiWait    time.Duration
 }
 
 func main() {
@@ -96,6 +98,16 @@ func main() {
 		telegram:  newTelegram(env.Or("TELEGRAM_API_URL", defaultTelegramAPI), token, chatID),
 		statuses:  statuses,
 		publicURL: strings.TrimRight(os.Getenv("OPSORA_PUBLIC_URL"), "/"),
+		ai:        newAIClient(strings.TrimSpace(os.Getenv("AI_SERVICE_URL"))),
+	}
+	// Slightly longer than ai-service's own AI_TIMEOUT so its timeout error,
+	// not ours, ends a slow analysis.
+	n.aiWait, err = time.ParseDuration(env.Or("AI_WAIT", "130s"))
+	if err != nil || n.aiWait <= 0 {
+		log.Fatalf("AI_WAIT must be a positive duration like 130s")
+	}
+	if n.ai == nil {
+		log.Printf("AI_SERVICE_URL not set: failure messages have no AI analysis")
 	}
 	log.Printf("notifier started: chat=%s statuses=%v", chatID, statuses)
 
@@ -153,9 +165,20 @@ func (n *notifier) send(ctx context.Context, b store.Build) error {
 		tail = lines
 	}
 
+	var analysis *store.Analysis
+	if failed != nil && n.ai != nil {
+		aiCtx, cancel := context.WithTimeout(ctx, n.aiWait)
+		a, err := n.ai.Analyze(aiCtx, b.ID)
+		cancel()
+		if err != nil {
+			log.Printf("build=%d sending without AI analysis: %v", b.ID, err)
+		}
+		analysis = a
+	}
+
 	sendCtx, cancel := context.WithTimeout(ctx, sendBudget)
 	defer cancel()
-	if err := n.telegram.Send(sendCtx, formatMessage(b, failed, tail, n.publicURL)); err != nil {
+	if err := n.telegram.Send(sendCtx, formatMessage(b, failed, tail, analysis, n.publicURL)); err != nil {
 		var rej *rejected
 		if !errors.As(err, &rej) {
 			return err

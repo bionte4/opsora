@@ -6,3 +6,4 @@ docker/
 /api-server/api-server
 /worker/worker
 /notifier/notifier
+/ai-service/ai-service

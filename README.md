@@ -2,11 +2,12 @@
 
 Opsora is a self-hosted CI platform written in Go. It receives GitHub webhooks,
 runs each build's steps in isolated Docker containers, reports the result back
-to GitHub as a commit status, announces it on Telegram, and exposes metrics to
-Prometheus and Grafana.
+to GitHub as a commit status, announces it on Telegram with an AI explanation
+of failures, and exposes metrics to Prometheus and Grafana.
 
 It is the first part of a larger "DevOps all-in-one" platform. Deployments,
-ChatOps, and an AI assistant backed by pgvector are planned but not built yet.
+ChatOps, search over past failures with pgvector, and change risk scores are
+planned but not built yet.
 
 ## How it works
 
@@ -18,8 +19,11 @@ GitHub ──webhook──▶ api-server ──build id──▶ Redis (build_qu
                         │                         │
                         ▼                         └──▶ GitHub commit status
                     notifier ──▶ Telegram
+                        │
+                        ▼
+                    ai-service ──▶ Ollama (on the host)
 
-api-server, worker, notifier ──/metrics──▶ Prometheus ──▶ Grafana
+api-server, worker, notifier, ai-service ──/metrics──▶ Prometheus ──▶ Grafana
 ```
 
 - **api-server** checks the webhook signature, records the delivery (duplicate
@@ -28,7 +32,11 @@ api-server, worker, notifier ──/metrics──▶ Prometheus ──▶ Grafan
 - **worker** takes build IDs from Redis, claims the build in Postgres, clones
   the commit into a fresh Docker volume, and runs the steps from
   `.opsora.yml`, each in its own container.
-- **notifier** sends one Telegram message for each finished build.
+- **notifier** sends one Telegram message for each finished build. For failed
+  builds it first asks ai-service for an analysis.
+- **ai-service** explains failed builds with a language model and stores the
+  result. Builds and notifications never depend on it: if it is down or slow,
+  the message is sent without the analysis.
 - **Postgres** is the source of truth. Redis only carries build IDs, so a lost
   Redis entry never loses a build.
 
@@ -106,6 +114,30 @@ messages link to the build logs.
 includes the repository, ref, commit link, duration, failed step, error, and the
 last lines of that step's log. Without a token the notifier stays idle.
 
+### AI analysis of failed builds
+
+ai-service sends the last 60 lines of the failed step's log to the model and
+asks for a short summary, a likely cause, and the numbers of the log lines that
+show the error. Cited line numbers are checked against the log, and the
+Telegram message quotes those lines so readers can verify the explanation.
+Each analysis is stored, so a build is analyzed once.
+
+It uses [Ollama](https://ollama.com) on the host, because Docker on macOS
+cannot use the GPU:
+
+```sh
+ollama pull phi3
+```
+
+Set `AI_MODEL` to use another installed model and `AI_LANGUAGE` (for example
+`Indonesian`) to change the language of the summary. On a MacBook Air M1 with
+8 GB of RAM, phi3 takes about 25 seconds per analysis and holds about 4 GB
+while loaded; `AI_KEEP_ALIVE` (default `2m`) controls how soon it is unloaded.
+To turn analysis off, set `AI_SERVICE_URL=` (empty) in `.env`.
+
+Log output is treated as untrusted data in the prompt, but a model can still be
+misled by it, so messages label the analysis "may be wrong".
+
 ## Pipeline file
 
 Put `.opsora.yml` at the root of the repository being built:
@@ -144,17 +176,25 @@ This repository builds itself with its own [`.opsora.yml`](.opsora.yml).
 | GET    | `/api/builds?limit=20`     | Latest builds (limit 1 to 100)                           |
 | GET    | `/api/builds/:id`          | One build with its steps                                 |
 | GET    | `/api/builds/:id/logs`     | Logs; `step=<position>`, `after=<id>`, `limit`, `format=text` |
+| GET    | `/api/builds/:id/analysis` | AI analysis of a failed build, with the cited log lines  |
+| GET    | `/api/integrations/ai`     | AI integration status: reachable, model installed, latency |
+| POST   | `/api/integrations/ai/test` | Test connection: runs a tiny generation (can take ~10s) |
 
 To follow a running build, pass the `X-Next-After` response header back as
 `after`.
 
+The integration endpoints always answer `200` with `configured`, plus
+`connected`/`model_available` (status) or `ok` (test) and an `error` message,
+so a dashboard card can render every outcome from one response shape.
+
 ## Metrics
 
 Each service serves Prometheus metrics on its own port: api-server on 9101,
-worker on 9102, notifier on 9103. Grafana starts with the provisioned
+worker on 9102, notifier on 9103, ai-service on 9104. Grafana starts with the provisioned
 "Opsora overview" dashboard, which shows queue length, running builds, build
 duration (p50 and p95), builds by status, failure rate, step duration,
-webhooks, requeues, Telegram notifications and API latency.
+webhooks, requeues, Telegram notifications, API latency, and AI requests
+and durations.
 
 Main metrics:
 
@@ -166,17 +206,20 @@ Main metrics:
 - `opsora_builds_requeued_total{reason}`
 - `opsora_webhooks_total{event,result}`
 - `opsora_notifications_total{result}`
+- `opsora_ai_requests_total{kind,result}`
+- `opsora_ai_duration_seconds{kind}`
 - `opsora_http_request_duration_seconds{route,method,code}`
 
 ## Development
 
-The code is a Go workspace (`go.work`) with four modules:
+The code is a Go workspace (`go.work`) with five modules:
 
 | Module        | Contents                                                       |
 | ------------- | -------------------------------------------------------------- |
 | `api-server/` | Fiber HTTP server: webhook, builds API, request metrics        |
 | `worker/`     | Queue consumer, pipeline runner, Docker client, GitHub statuses |
 | `notifier/`   | Telegram notifications                                         |
+| `ai-service/` | Failure analysis with a language model (Ollama)                |
 | `shared/`     | Postgres store and migrations, Redis queue, metrics, env loading |
 
 Database migrations live in `shared/store/migrations` and run automatically
@@ -194,12 +237,12 @@ cd api-server && go run .
 Before sending a change, run the same checks as the pipeline:
 
 ```sh
-go vet ./api-server/... ./worker/... ./notifier/... ./shared/...
-go test ./api-server/... ./worker/... ./notifier/... ./shared/...
+go vet ./api-server/... ./worker/... ./notifier/... ./ai-service/... ./shared/...
+go test ./api-server/... ./worker/... ./notifier/... ./ai-service/... ./shared/...
 ```
 
 Container images are built from the single root `Dockerfile` with
-`--build-arg SERVICE=<api-server|worker|notifier>`.
+`--build-arg SERVICE=<api-server|worker|notifier|ai-service>`.
 
 ## Security notes
 

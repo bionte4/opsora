@@ -19,7 +19,7 @@ func TestFormatMessageFailure(t *testing.T) {
 	step := &store.Step{Position: 3, Name: "test", Status: store.StepFailed}
 	tail := []store.LogLine{{Line: "--- FAIL: TestX"}, {Line: "want <nil>, got &errors.errorString"}}
 
-	msg := formatMessage(b, step, tail, "https://ci.example.com")
+	msg := formatMessage(b, step, tail, nil, "https://ci.example.com")
 	for _, want := range []string{
 		"<b>Build #7 failed</b>",
 		"Repo: <b>bionte4/opsora</b>",
@@ -39,7 +39,7 @@ func TestFormatMessageFailure(t *testing.T) {
 
 func TestFormatMessageSuccess(t *testing.T) {
 	b := store.Build{ID: 8, Repository: "o/r", Ref: "refs/tags/v1.0", CommitSHA: "abc", Status: store.StatusSuccess}
-	msg := formatMessage(b, nil, nil, "")
+	msg := formatMessage(b, nil, nil, nil, "")
 	if !strings.Contains(msg, "<b>Build #8 passed</b>") || !strings.Contains(msg, "tag v1.0") {
 		t.Fatalf("unexpected message:\n%s", msg)
 	}
@@ -55,11 +55,41 @@ func TestFormatMessageFitsTelegramLimit(t *testing.T) {
 	for i := range tail {
 		tail[i].Line = line
 	}
-	msg := formatMessage(b, &store.Step{Name: "x", Status: store.StepFailed}, tail, "")
+	msg := formatMessage(b, &store.Step{Name: "x", Status: store.StepFailed}, tail, nil, "")
 	if n := len([]rune(msg)); n > maxMessage {
 		t.Fatalf("message is %d characters, limit %d", n, maxMessage)
 	}
 	if !strings.Contains(msg, "<pre>&lt;&amp;&gt;") || !strings.HasSuffix(msg, "...</pre>") {
 		t.Fatalf("expected a clipped, escaped tail:\n%s", msg)
+	}
+}
+
+func TestFormatMessageWithAnalysis(t *testing.T) {
+	b := store.Build{ID: 9, Repository: "o/r", Status: store.StatusFailed}
+	step := &store.Step{Name: "test", Status: store.StepFailed}
+	a := &store.Analysis{
+		Model:   "phi3",
+		Summary: `Step "test" failed: want 3, got 2.`,
+		Cause:   "Len() <off by one>",
+		Lines:   []store.LogLine{{Line: "queue_test.go:42: want 3, got 2"}},
+	}
+	msg := formatMessage(b, step, []store.LogLine{{Line: "exit status 1"}}, a, "")
+	for _, want := range []string{
+		"<b>AI analysis</b> <i>(phi3, may be wrong)</i>",
+		"Step &#34;test&#34; failed: want 3, got 2.",
+		"Likely cause: Len() &lt;off by one&gt;",
+		"<blockquote>queue_test.go:42: want 3, got 2</blockquote>",
+		"<pre>exit status 1</pre>",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message missing %q\n%s", want, msg)
+		}
+	}
+
+	// A huge analysis must not push the message over the limit.
+	a.Summary = strings.Repeat("<", 3000)
+	msg = formatMessage(b, step, []store.LogLine{{Line: "x"}}, a, "")
+	if n := len([]rune(msg)); n > maxMessage {
+		t.Fatalf("message is %d characters, limit %d", n, maxMessage)
 	}
 }

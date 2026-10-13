@@ -1,6 +1,7 @@
 go 1.27.2
 
 use (
+	./ai-service
 	./api-server
 	./notifier
 	./shared

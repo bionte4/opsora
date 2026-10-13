@@ -12,6 +12,9 @@ scrape_configs:
   - job_name: notifier
     static_configs:
       - targets: ["notifier:9103"]
+  - job_name: ai-service
+    static_configs:
+      - targets: ["ai-service:9104"]
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
